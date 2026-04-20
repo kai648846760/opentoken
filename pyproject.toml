@@ -1,0 +1,34 @@
+[project]
+name = 'openclaw-algae'
+version = '0.1.0'
+description = 'Zero-token OpenAI-compatible gateway for OpenClaw and other clients'
+readme = 'README.md'
+requires-python = '>=3.13'
+dependencies = [
+  'camoufox>=0.4,<0.5',
+  'fastapi>=0.115.0',
+  'httpx>=0.28.0',
+  'pydantic>=2.11.0',
+  'python-multipart>=0.0.20',
+  'typer>=0.16.0',
+  'uvicorn>=0.34.0',
+  'wasmtime>=42,<43',
+]
+
+[project.optional-dependencies]
+dev = [
+  'pytest>=8.3.0',
+]
+
+[project.scripts]
+openclaw-algae = 'openclaw_algae.main:main'
+
+[build-system]
+requires = ['hatchling>=1.25.0']
+build-backend = 'hatchling.build'
+
+[tool.uv]
+package = true
+
+[tool.pytest.ini_options]
+testpaths = ['tests']

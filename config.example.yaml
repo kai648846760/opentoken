@@ -1,0 +1,75 @@
+# OpenClaw Algae — Gateway Configuration
+# 网关配置：浏览器实例池 + 故障转移 + 适配器管理
+
+# ========================================
+# 服务器配置
+# ========================================
+server:
+  host: 127.0.0.1
+  port: 32117
+
+# ========================================
+# 浏览器配置
+# ========================================
+browser:
+  headless: true           # 无头模式（服务器推荐 true）
+  # path: ""               # Camoufox 可执行文件路径（留空使用默认）
+  proxy:
+    enable: false          # 是否启用全局代理
+    type: http             # http 或 socks5
+    host: 127.0.0.1
+    port: 7890
+    # user: username       # 可选代理认证
+    # passwd: password
+
+# ========================================
+# 浏览器实例池配置
+# ========================================
+pool:
+  strategy: least_busy     # least_busy | round_robin | random
+  failover:
+    enabled: true          # 启用故障转移
+    max_retries: 2         # 最大重试次数
+  wait_timeout: 120000     # 生成等待超时（毫秒）
+
+# ========================================
+# 浏览器实例列表
+# ========================================
+# 每个实例是一个独立的浏览器进程，多个 worker 共享同一浏览器
+# 使用相同 userDataMark 的实例会共享浏览器数据和登录状态
+instances:
+  - name: browser_default
+    # userDataMark: ""     # 留空时使用默认数据目录
+    workers:
+      - name: deepseek_worker
+        worker_type: deepseek
+      - name: claude_worker
+        worker_type: claude
+      - name: doubao_worker
+        worker_type: doubao
+      - name: kimi_worker
+        worker_type: kimi
+
+  # 多实例示例（需要多个账号/代理时使用）：
+  # - name: browser_us
+  #   userDataMark: us
+  #   proxy:
+  #     enable: true
+  #     type: socks5
+  #     host: 192.168.1.10
+  #     port: 1080
+  #   workers:
+  #     - name: us_gemini
+  #       worker_type: gemini
+
+# ========================================
+# 适配器专属配置
+# ========================================
+adapter:
+  # 模型过滤器示例（白名单/黑名单）
+  # doubao:
+  #   model_filter:
+  #     mode: whitelist
+  #     list:
+  #       - doubao-seed-2.0
+  #       - doubao-pro

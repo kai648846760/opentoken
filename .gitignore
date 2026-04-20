@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+.openclaw-algae/
+.openclaw/
+
+# Logs / runtime files
+*.log
+*.pid
+tmp/
+temp/
+
+# OS / editor / local agent state
+.DS_Store
+.idea/
+.vscode/
+.claude/
+
+# Local planning / generated reports
+docs/superpowers/
+findings.md
+progress.md
+task_plan.md
+*_live_200*.md
