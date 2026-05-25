@@ -117,7 +117,10 @@ def _resolve_prefixed_model(model_ref: str) -> ResolvedModelRef | None:
         provider = resolve_provider_key(parts[1])
         if provider is None:
             return None
-        provider_model = normalize_provider_model(provider, parts[-1])
+        # Some providers (NIM, LiteLLM-style unified backends) embed slashes in
+        # their model ids themselves (e.g. "deepseek-ai/deepseek-r1"). Keep
+        # everything after the provider segment as the upstream model id.
+        provider_model = normalize_provider_model(provider, "/".join(parts[2:]))
         return ResolvedModelRef(
             provider=provider,
             provider_model=provider_model,

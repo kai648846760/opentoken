@@ -104,6 +104,13 @@ _SUPPORTED_PROVIDERS: tuple[ProviderDefinition, ...] = (
         login_modes=("manual",),
         manual_auth=("api_key",),
     ),
+    ProviderDefinition(
+        key="nim",
+        display_name="NVIDIA NIM",
+        aliases=("nim", "nvidia", "nvidia nim", "nvidia-nim"),
+        login_modes=("manual",),
+        manual_auth=("api_key",),
+    ),
 )
 
 

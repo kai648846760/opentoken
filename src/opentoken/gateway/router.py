@@ -24,7 +24,9 @@ from opentoken.providers.grok import GrokWebAdapter
 from opentoken.providers.kimi import KimiWebAdapter
 from opentoken.providers.manus import ManusApiAdapter
 from opentoken.providers.mimo import MimoWebAdapter
+from opentoken.providers.nim import NimChatAdapter
 from opentoken.providers.qwen import QwenCnWebAdapter, QwenWebAdapter
+from opentoken.failover.model_chain import chain_from_credentials, run_with_chain, stream_with_chain
 from opentoken.models.openai_compat import resolve_requested_model
 from opentoken.providers.registry import supported_provider_keys
 from opentoken.storage.provider_store import load_provider_credentials
@@ -33,8 +35,12 @@ logger = logging.getLogger(__name__)
 
 # Provider types that use direct HTTP API calls (bypass browser pool)
 _HTTP_PROVIDERS = frozenset({
-    "deepseek", "claude", "kimi", "manus", "mimo",
+    "deepseek", "claude", "kimi", "manus", "mimo", "nim",
 })
+
+# Providers that support cross-model fallback when rate-limited. NIM is the
+# initial member because its catalog has many equivalent-tier free models.
+_CHAINABLE_PROVIDERS = frozenset({"nim"})
 
 # Provider types that use the browser pool
 _BROWSER_PROVIDERS = frozenset({
@@ -72,6 +78,7 @@ class PoolAwareRouter:
             "kimi": KimiWebAdapter(),
             "manus": ManusApiAdapter(),
             "mimo": MimoWebAdapter(),
+            "nim": NimChatAdapter(),
             "doubao": BrowserChatAdapter(
                 provider_name="Doubao",
                 login_hint="opentoken login doubao",
@@ -153,6 +160,13 @@ class PoolAwareRouter:
         stream_method = getattr(adapter, "stream_chat", None)
         if not callable(stream_method):
             return None
+        if provider_name in _CHAINABLE_PROVIDERS:
+            chain = chain_from_credentials(credentials if hasattr(credentials, "metadata") else None)
+            return stream_with_chain(
+                request,
+                chain,
+                lambda req: stream_method(req, credentials),
+            )
         return stream_method(request, credentials)
 
     def _call_http_provider(
@@ -167,6 +181,13 @@ class PoolAwareRouter:
         adapter = self._http_adapters.get(provider_name)
         if adapter is None:
             raise RuntimeError(f"No adapter registered for {provider_name}")
+        if provider_name in _CHAINABLE_PROVIDERS:
+            chain = chain_from_credentials(credentials if hasattr(credentials, "metadata") else None)
+            return run_with_chain(
+                request,
+                chain,
+                lambda req: adapter.chat(req, credentials),
+            )
         return adapter.chat(request, credentials)
 
     def _call_browser_provider(

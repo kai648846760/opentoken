@@ -56,6 +56,14 @@ _MODEL_DEFINITIONS: tuple[tuple[str, str, str], ...] = (
     ('mimo', 'mimo-2.5-pro', 'MiMo 2.5 Pro'),
     ('manus', 'manus-1.6', 'Manus 1.6'),
     ('manus', 'manus-1.6-lite', 'Manus 1.6 Lite'),
+    # NVIDIA NIM hosts a rotating catalog of strong open-weight models behind
+    # an OpenAI-compatible endpoint. The exact list varies; these are the
+    # high-leverage picks that map well onto the free tier as of 2026.
+    ('nim', 'deepseek-ai/deepseek-r1', 'DeepSeek R1 (NIM)'),
+    ('nim', 'meta/llama-3.3-70b-instruct', 'Llama 3.3 70B Instruct (NIM)'),
+    ('nim', 'qwen/qwen2.5-72b-instruct', 'Qwen 2.5 72B Instruct (NIM)'),
+    ('nim', 'qwen/qwen2.5-coder-32b-instruct', 'Qwen 2.5 Coder 32B (NIM)'),
+    ('nim', 'mistralai/mixtral-8x22b-instruct-v0.1', 'Mixtral 8x22B Instruct (NIM)'),
 )
 
 
