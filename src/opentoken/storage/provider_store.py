@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -17,8 +18,28 @@ def _provider_path(state_dir: Path, provider: str) -> Path:
     return state_dir / f"{provider}.json"
 
 
-def save_provider_credentials(state_dir: Path, record: ProviderCredentialRecord) -> Path:
+def save_provider_credentials(
+    state_dir: Path,
+    record: ProviderCredentialRecord,
+    *,
+    validator: Callable[[ProviderCredentialRecord], bool] | None = None,
+) -> Path | None:
+    """Persist a provider credential record.
+
+    If a `validator` is provided, it must return True before any existing record
+    is overwritten — if validation fails the old credentials are kept and this
+    function returns None. This is the dry-run-before-overwrite contract used
+    after browser harvest, so a botched harvest can't replace a previously-good
+    cookie with a broken one.
+    """
     state_dir.mkdir(parents=True, exist_ok=True)
+    if validator is not None:
+        try:
+            ok = bool(validator(record))
+        except Exception:
+            ok = False
+        if not ok:
+            return None
     target = _provider_path(state_dir, record.provider)
     write_json_atomic(target, record.model_dump())
     save_auth_profile_record(state_dir, record)
