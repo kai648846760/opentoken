@@ -30,22 +30,35 @@ def test_chat_completions_returns_openai_style_response(monkeypatch) -> None:
 
     assert response.status_code == 200
     payload = response.json()
-    assert set(payload.keys()) == {"id", "object", "created", "model", "choices", "usage"}
+    assert set(payload.keys()) == {
+        "id",
+        "object",
+        "created",
+        "model",
+        "choices",
+        "usage",
+        "system_fingerprint",
+    }
     assert payload["object"] == "chat.completion"
     assert isinstance(payload["id"], str)
     assert payload["id"].startswith("chatcmpl-")
     assert isinstance(payload["created"], int)
     assert payload["model"] == "algae/deepseek/deepseek-chat"
+    assert isinstance(payload["system_fingerprint"], str) and payload["system_fingerprint"]
     assert len(payload["choices"]) == 1
     assert set(payload["choices"][0].keys()) == {"index", "message", "finish_reason"}
     assert set(payload["choices"][0]["message"].keys()) == {"role", "content"}
     assert payload["choices"][0]["message"]["role"] == "assistant"
     assert payload["choices"][0]["message"]["content"] == "provider answer"
-    assert payload["usage"] == {
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
-    }
+    # usage is now estimated, not hardcoded zero — assert structure + non-negative ints.
+    assert set(payload["usage"].keys()) == {"prompt_tokens", "completion_tokens", "total_tokens"}
+    assert all(isinstance(v, int) and v >= 0 for v in payload["usage"].values())
+    assert payload["usage"]["prompt_tokens"] > 0
+    assert payload["usage"]["completion_tokens"] > 0
+    assert (
+        payload["usage"]["total_tokens"]
+        == payload["usage"]["prompt_tokens"] + payload["usage"]["completion_tokens"]
+    )
 
 
 class HttpErrorRouter:

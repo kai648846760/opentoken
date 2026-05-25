@@ -16,6 +16,11 @@ from opentoken.api.streaming import (
     sse_response_headers,
     strip_tool_protocol_markup,
 )
+from opentoken.api.usage import (
+    SYSTEM_FINGERPRINT,
+    estimate_prompt_tokens,
+    estimate_tokens,
+)
 from opentoken.gateway.normalized import normalize_chat_completions_request
 from opentoken.gateway.router import get_default_router
 from opentoken.providers.base import ProviderRateLimitError
@@ -84,15 +89,16 @@ def chat_completions(payload: dict[str, object]) -> dict[str, object]:
             error_type="api_error",
         )
     created = int(time())
-    message = _chat_message_payload(
-        strip_tool_protocol_markup(response.content, include_think=False),
-        response.tool_calls,
-    )
+    visible_content = strip_tool_protocol_markup(response.content, include_think=False) or ""
+    message = _chat_message_payload(visible_content, response.tool_calls)
+    prompt_tokens = estimate_prompt_tokens(payload.get("messages") if isinstance(payload, dict) else None)
+    completion_tokens = estimate_tokens(visible_content)
     return {
         "id": f"chatcmpl-{uuid4().hex}",
         "object": "chat.completion",
         "created": created,
         "model": response.model,
+        "system_fingerprint": SYSTEM_FINGERPRINT,
         "choices": [
             {
                 "index": 0,
@@ -100,7 +106,11 @@ def chat_completions(payload: dict[str, object]) -> dict[str, object]:
                 "finish_reason": response.finish_reason,
             }
         ],
-        "usage": _empty_chat_usage(),
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
     }
 
 
@@ -115,6 +125,7 @@ def _stream_chat_completion(
         "object": "chat.completion.chunk",
         "created": created,
         "model": request.model,
+        "system_fingerprint": SYSTEM_FINGERPRINT,
         "choices": [
             {
                 "index": 0,
@@ -206,6 +217,7 @@ def _stream_chat_completion(
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": request.model,
+                    "system_fingerprint": SYSTEM_FINGERPRINT,
                     "choices": [
                         {
                             "index": 0,
@@ -284,6 +296,7 @@ def _stream_chat_completion(
         "object": "chat.completion.chunk",
         "created": created,
         "model": response.model,
+        "system_fingerprint": SYSTEM_FINGERPRINT,
         "choices": [
             {
                 "index": 0,
@@ -297,12 +310,12 @@ def _stream_chat_completion(
 
 
 def _chat_message_payload(content: str | None, tool_calls: list[dict[str, object]]) -> dict[str, object]:
-    message: dict[str, object] = {"role": "assistant", "content": content}
     if tool_calls:
-        message["tool_calls"] = tool_calls
-        if content in {"", None}:
-            message["content"] = None
-    return message
+        # OpenAI spec: when tool_calls is set, content must be null. Some clients
+        # treat a non-null content alongside tool_calls as the assistant having
+        # already answered, which makes them skip the function-call branch.
+        return {"role": "assistant", "content": None, "tool_calls": tool_calls}
+    return {"role": "assistant", "content": content}
 
 
 def _format_validation_error(exc: ValidationError) -> str:
