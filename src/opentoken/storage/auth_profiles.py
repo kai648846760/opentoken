@@ -4,6 +4,7 @@ import copy
 import json
 from pathlib import Path
 
+from opentoken.storage._atomic import write_json_atomic
 from opentoken.config.paths import resolve_state_dir
 from opentoken.models.provider_credentials import ProviderCredentialRecord
 
@@ -159,7 +160,7 @@ def _load_store(path: Path) -> dict[str, object]:
 
 def _save_store(path: Path, store: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(path, store)
 
 
 def _candidate_auth_profile_paths(providers_dir: Path) -> list[Path]:

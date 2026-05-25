@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import copy
 import json
+import time
+from collections import OrderedDict
 from pathlib import Path
+
+from opentoken.storage._atomic import file_lock, write_json_atomic
 
 
 _DEFAULT_STORE: dict[str, object] = {
     "version": 1,
     "responses": {},
 }
+
+# Default retention: 7 days OR 1024 entries, whichever fires first. previous_response_id
+# is meant for short-lived conversation context — the store used to grow forever, which
+# eventually corrupted JSON on disk and made every load slower.
+_DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
+_DEFAULT_MAX_ENTRIES = 1024
 
 
 def load_response_messages(state_dir: Path, response_id: str) -> list[dict[str, object]] | None:
@@ -30,18 +40,44 @@ def save_response_messages(
     response_id: str,
     model: str,
     messages: list[dict[str, object]],
+    ttl_seconds: int = _DEFAULT_TTL_SECONDS,
+    max_entries: int = _DEFAULT_MAX_ENTRIES,
 ) -> None:
     path = _resolve_response_store_path(state_dir)
-    store = _load_store(path)
-    responses = store.setdefault("responses", {})
-    if not isinstance(responses, dict):
-        responses = {}
-        store["responses"] = responses
-    responses[response_id] = {
-        "model": model,
-        "messages": copy.deepcopy(messages),
-    }
-    _save_store(path, store)
+    with file_lock(path):
+        store = _load_store(path)
+        responses_raw = store.get("responses", {})
+        # Use an OrderedDict so we can evict LRU when over the cap. Re-inserting moves
+        # to the end implicitly because we del-then-set below.
+        if isinstance(responses_raw, dict):
+            responses = OrderedDict(responses_raw)
+        else:
+            responses = OrderedDict()
+
+        now = int(time.time())
+        # Expire by age first.
+        if ttl_seconds > 0:
+            cutoff = now - ttl_seconds
+            for stale_id in [
+                key
+                for key, entry in responses.items()
+                if isinstance(entry, dict) and int(entry.get("updated_at", 0)) < cutoff
+            ]:
+                responses.pop(stale_id, None)
+
+        responses.pop(response_id, None)
+        responses[response_id] = {
+            "model": model,
+            "messages": copy.deepcopy(messages),
+            "updated_at": now,
+        }
+
+        # Cap by count.
+        while max_entries > 0 and len(responses) > max_entries:
+            responses.popitem(last=False)
+
+        store["responses"] = dict(responses)
+        _save_store(path, store)
 
 
 def _resolve_response_store_path(state_dir: Path) -> Path:
@@ -64,4 +100,4 @@ def _load_store(path: Path) -> dict[str, object]:
 
 def _save_store(path: Path, store: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(path, store)

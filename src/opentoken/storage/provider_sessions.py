@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from opentoken.storage._atomic import write_json_atomic
 from opentoken.models.provider_credentials import ProviderCredentialRecord
 
 
@@ -29,7 +30,7 @@ def save_provider_session(
     store = _load_store(path)
     store[_session_key(provider, credentials)] = dict(state)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(path, store)
     return path
 
 

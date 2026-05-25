@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import random
+import threading
 from abc import ABC, abstractmethod
 
 
@@ -39,19 +40,26 @@ class RoundRobinStrategy(LoadBalancer):
 
     def __init__(self) -> None:
         self._index = 0
+        self._lock = threading.Lock()
 
     def sort(self, candidates: list[Worker]) -> list[Worker]:
-        idx = self._index % max(len(candidates), 1)
-        self._index += 1
+        with self._lock:
+            idx = self._index % max(len(candidates), 1)
+            self._index += 1
         return list(candidates[idx:]) + list(candidates[:idx])
 
 
 class RandomStrategy(LoadBalancer):
     """Random selection across candidates."""
 
+    def __init__(self) -> None:
+        # Each instance gets its own Random — the global random module's state is
+        # shared across threads and concurrent shuffle() calls can interfere.
+        self._random = random.Random()
+
     def sort(self, candidates: list[Worker]) -> list[Worker]:
         result = list(candidates)
-        random.shuffle(result)
+        self._random.shuffle(result)
         return result
 
 

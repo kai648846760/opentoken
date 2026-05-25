@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from opentoken.storage._atomic import write_json_atomic
 from time import time
 from uuid import uuid4
 
@@ -124,13 +125,24 @@ def complete_upload(
     else:
         ordered_parts = [part for part in parts if isinstance(part, dict)]
 
-    content = b"".join(
-        _resolve_part_blob_path(state_dir, upload_id, str(part.get("id", ""))).read_bytes()
+    part_blob_paths = [
+        _resolve_part_blob_path(state_dir, upload_id, str(part.get("id", "")))
         for part in ordered_parts
-    )
+    ]
+    content = b"".join(blob_path.read_bytes() for blob_path in part_blob_paths)
     entry["status"] = "completed"
     entry["completed_at"] = int(time())
     _save_store(path, store)
+
+    # Free the per-part blobs once the upload is materialised — leaving them around
+    # accumulates per-upload temp files forever and lets a duplicated upload_id step
+    # on stale data.
+    for blob_path in part_blob_paths:
+        try:
+            blob_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     return _public_upload(entry), content
 
 
@@ -191,4 +203,4 @@ def _load_store(path: Path) -> dict[str, object]:
 
 def _save_store(path: Path, store: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(path, store)

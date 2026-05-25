@@ -3,6 +3,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from opentoken.storage._atomic import write_json_atomic
 from opentoken.models.provider_credentials import ProviderCredentialRecord
 from opentoken.storage.auth_profiles import (
     delete_auth_profile_record,
@@ -19,7 +20,7 @@ def _provider_path(state_dir: Path, provider: str) -> Path:
 def save_provider_credentials(state_dir: Path, record: ProviderCredentialRecord) -> Path:
     state_dir.mkdir(parents=True, exist_ok=True)
     target = _provider_path(state_dir, record.provider)
-    target.write_text(json.dumps(record.model_dump(), indent=2), encoding="utf-8")
+    write_json_atomic(target, record.model_dump())
     save_auth_profile_record(state_dir, record)
     return target
 

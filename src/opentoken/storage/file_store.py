@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from time import time
 from uuid import uuid4
+
+from opentoken.storage._atomic import file_lock, write_json_atomic
+
+
+_SAFE_FILE_ID = re.compile(r"^file-[A-Za-z0-9]{16,}$")
 
 _DEFAULT_STORE: dict[str, object] = {
     "version": 1,
@@ -32,13 +38,14 @@ def create_file(
         "mime_type": mime_type or "application/octet-stream",
     }
     path = _resolve_store_path(state_dir)
-    store = _load_store(path)
-    files = store.setdefault("files", {})
-    if not isinstance(files, dict):
-        files = {}
-        store["files"] = files
-    files[file_id] = copy.deepcopy(metadata)
-    _save_store(path, store)
+    with file_lock(path):
+        store = _load_store(path)
+        files = store.setdefault("files", {})
+        if not isinstance(files, dict):
+            files = {}
+            store["files"] = files
+        files[file_id] = copy.deepcopy(metadata)
+        _save_store(path, store)
     _resolve_blob_path(state_dir, file_id).write_bytes(content)
     return copy.deepcopy(metadata)
 
@@ -78,13 +85,16 @@ def read_file_content(state_dir: Path, file_id: str) -> tuple[dict[str, object],
 
 
 def delete_file(state_dir: Path, file_id: str) -> bool:
-    path = _resolve_store_path(state_dir)
-    store = _load_store(path)
-    files = store.get("files", {})
-    if not isinstance(files, dict) or file_id not in files:
+    if not _SAFE_FILE_ID.match(file_id):
         return False
-    files.pop(file_id, None)
-    _save_store(path, store)
+    path = _resolve_store_path(state_dir)
+    with file_lock(path):
+        store = _load_store(path)
+        files = store.get("files", {})
+        if not isinstance(files, dict) or file_id not in files:
+            return False
+        files.pop(file_id, None)
+        _save_store(path, store)
     blob_path = _resolve_blob_path(state_dir, file_id)
     try:
         blob_path.unlink(missing_ok=True)
@@ -111,6 +121,12 @@ def _resolve_store_path(state_dir: Path) -> Path:
 
 
 def _resolve_blob_path(state_dir: Path, file_id: str) -> Path:
+    # Reject anything that doesn't look like an id we minted — this is the only
+    # surface that turns a caller-controlled string into a filesystem path, so
+    # treat it as untrusted and refuse traversal attempts (``../``, embedded
+    # ``/`` separators, NULs, empty strings).
+    if not _SAFE_FILE_ID.match(file_id):
+        raise ValueError(f"Refusing to resolve unsafe file id: {file_id!r}")
     blob_path = state_dir / "files" / f"{file_id}.bin"
     blob_path.parent.mkdir(parents=True, exist_ok=True)
     return blob_path
@@ -131,5 +147,4 @@ def _load_store(path: Path) -> dict[str, object]:
 
 
 def _save_store(path: Path, store: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(path, store)
