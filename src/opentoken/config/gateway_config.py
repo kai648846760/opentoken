@@ -48,7 +48,12 @@ class PoolConfig(BaseModel):
 
 class ModelFilterConfig(BaseModel):
     mode: str = "blacklist"  # whitelist or blacklist
-    list: list[str] = Field(default_factory=list)
+    # Field name `list` previously shadowed the builtin during forward-ref
+    # evaluation on Python 3.14, breaking pydantic model rebuilds. Renamed
+    # to `entries` with `list` kept as an alias for YAML backwards-compat.
+    entries: list[str] = Field(default_factory=list, alias="list")
+
+    model_config = {"populate_by_name": True}
 
 
 class AdapterConfig(BaseModel):

@@ -14,6 +14,7 @@ from opentoken.api.routes.health import router as health_router
 from opentoken.api.routes.models import router as models_router
 from opentoken.api.routes.responses import router as responses_router
 from opentoken.api.routes.uploads import router as uploads_router
+from opentoken.config.gateway_config import load_gateway_config
 
 
 logger = logging.getLogger("opentoken.api")
@@ -21,6 +22,7 @@ logger = logging.getLogger("opentoken.api")
 
 def create_app() -> FastAPI:
     app = FastAPI(title="OpenToken")
+    _bootstrap_gateway_config()
 
     @app.middleware("http")
     async def assign_request_id(request: Request, call_next):
@@ -89,3 +91,29 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(responses_router)
     return app
+
+
+def _bootstrap_gateway_config() -> None:
+    """Read the gateway YAML config so its presence is observable in logs.
+
+    The pool-aware router currently does not wire worker.page into provider
+    adapters, so v1 ships in single-worker mode even when the YAML asks for
+    multiple workers — make that obvious in logs instead of silently ignoring
+    the config.
+    """
+    config = load_gateway_config()
+    if config is None:
+        return
+    pool = getattr(config, "pool", None)
+    if pool is None:
+        logger.info("gateway_config_loaded pool=disabled")
+        return
+    if getattr(pool, "enabled", False):
+        logger.warning(
+            "gateway_config_pool_requested_but_not_active: "
+            "the pool/failover stack is loaded but worker.page is not yet "
+            "threaded into the provider adapters, so v1 runs in single-worker "
+            "mode. Pool config has been read but not activated."
+        )
+    else:
+        logger.info("gateway_config_loaded pool=disabled")

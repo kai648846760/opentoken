@@ -899,8 +899,7 @@ def test_uploads_and_embeddings_over_real_http(http_server, tmp_path: Path) -> N
     assert complete.json()["filename"] == "joined.txt"
     assert complete.json()["bytes"] == 11
 
-    assert embeddings.status_code == 200
-    embedding_payload = embeddings.json()
-    assert embedding_payload["model"] == "text-embedding-3-small"
-    assert [item["index"] for item in embedding_payload["data"]] == [0, 1]
-    assert len(embedding_payload["data"][0]["embedding"]) == 256
+    # /v1/embeddings now returns 501 — opentoken doesn't host a real embedding
+    # backend. See tests/api/test_embeddings.py for the canonical contract test.
+    assert embeddings.status_code == 501
+    assert embeddings.json()["error"]["type"] == "not_implemented"

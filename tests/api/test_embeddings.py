@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from opentoken.api.app import create_app
 
 
-def test_embeddings_supports_string_input() -> None:
+def test_embeddings_returns_501_until_a_real_backend_is_wired() -> None:
     client = TestClient(create_app())
 
     response = client.post(
@@ -16,20 +16,16 @@ def test_embeddings_supports_string_input() -> None:
         },
     )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["object"] == "list"
-    assert payload["model"] == "text-embedding-3-small"
-    assert len(payload["data"]) == 1
-    assert payload["data"][0]["object"] == "embedding"
-    assert payload["data"][0]["index"] == 0
-    assert isinstance(payload["data"][0]["embedding"], list)
-    assert len(payload["data"][0]["embedding"]) == 256
-    assert payload["usage"]["prompt_tokens"] > 0
-    assert payload["usage"]["total_tokens"] == payload["usage"]["prompt_tokens"]
+    # Previously this returned deterministic SHA-256 noise dressed up as
+    # OpenAI-shaped embeddings, which is worse than nothing — it broke any RAG /
+    # vector-store consumer with silent garbage. We now refuse instead.
+    assert response.status_code == 501
+    body = response.json()
+    assert body["error"]["type"] == "not_implemented"
+    assert "embedding" in body["error"]["message"].lower()
 
 
-def test_embeddings_supports_batch_input() -> None:
+def test_embeddings_batch_input_also_501() -> None:
     client = TestClient(create_app())
 
     response = client.post(
@@ -40,8 +36,4 @@ def test_embeddings_supports_batch_input() -> None:
         },
     )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert [item["index"] for item in payload["data"]] == [0, 1]
-    assert len(payload["data"][0]["embedding"]) == 256
-    assert len(payload["data"][1]["embedding"]) == 256
+    assert response.status_code == 501

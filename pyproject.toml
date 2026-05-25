@@ -1,7 +1,7 @@
 [project]
 name = 'opentoken'
 version = '0.1.0'
-description = 'Zero-token OpenAI-compatible gateway for OpenToken and other clients'
+description = 'Zero-token OpenAI-compatible gateway for many LLM providers'
 readme = 'README.md'
 requires-python = '>=3.13'
 dependencies = [
@@ -9,6 +9,7 @@ dependencies = [
   'fastapi>=0.115.0',
   'httpx>=0.28.0',
   'pydantic>=2.11.0',
+  'pyyaml>=6.0',
   'python-multipart>=0.0.20',
   'typer>=0.16.0',
   'uvicorn>=0.34.0',
@@ -18,6 +19,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   'pytest>=8.3.0',
+]
+unified = [
+  'litellm>=1.50.0',
 ]
 
 [project.scripts]
