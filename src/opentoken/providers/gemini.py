@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from collections.abc import Callable
 from collections.abc import Iterator
 from typing import Any
@@ -11,6 +12,7 @@ import httpx
 from opentoken.gateway.normalized import NormalizedChatRequest
 from opentoken.models.model_aliases import normalize_provider_model
 from opentoken.models.provider_credentials import ProviderCredentialRecord
+from opentoken.providers._client_cache import BoundedClientCache
 from opentoken.providers.base import ChatResponse, ProviderAdapter
 from opentoken.providers.prompts import build_role_prompt
 from opentoken.providers.web_tool_calling import (
@@ -53,7 +55,7 @@ class GeminiApiClient:
             params={
                 "bl": "boq_assistant-bard-web-server_20240101.00_p0",
                 "at": self._extract_at_token(),
-                "_reqid": str(hash(message) % 100000),
+                "_reqid": str(secrets.randbelow(1_000_000)),
                 "rt": "c",
             },
             content=f"f.req={json.dumps([[message]])}",
@@ -67,7 +69,7 @@ class GeminiApiClient:
                 params={
                     "bl": "boq_assistant-bard-web-server_20240101.00_p0",
                     "at": self._extract_at_token(),
-                    "_reqid": str(hash(message) % 100000),
+                    "_reqid": str(secrets.randbelow(1_000_000)),
                     "rt": "c",
                 },
                 content=f"f.req={json.dumps([[message]])}",
@@ -83,7 +85,7 @@ class GeminiApiClient:
         params = {
             "bl": "boq_assistant-bard-web-server_20240101.00_p0",
             "at": self._extract_at_token(),
-            "_reqid": str(hash(message) % 100000),
+            "_reqid": str(secrets.randbelow(1_000_000)),
             "rt": "c",
         }
         with self._client.stream(
@@ -127,7 +129,7 @@ class GeminiWebAdapter(ProviderAdapter):
         self._client_factory = client_factory or (
             lambda credentials: GeminiApiClient(credentials)
         )
-        self._client_cache: dict[str, GeminiApiClient] = {}
+        self._client_cache: BoundedClientCache[GeminiApiClient] = BoundedClientCache()
 
     def _client_key(self, credentials: ProviderCredentialRecord) -> str:
         return f"{credentials.provider}:{credentials.cookie}:{credentials.user_agent}"
@@ -143,7 +145,7 @@ class GeminiWebAdapter(ProviderAdapter):
         client = self._client_cache.get(key)
         if client is None:
             client = self._client_factory(credentials)
-            self._client_cache[key] = client
+            self._client_cache.set(key, client)
         model = normalize_provider_model(
             credentials.provider,
             request.model.rsplit("/", 1)[-1],
@@ -185,7 +187,7 @@ class GeminiWebAdapter(ProviderAdapter):
         client = self._client_cache.get(key)
         if client is None:
             client = self._client_factory(credentials)
-            self._client_cache[key] = client
+            self._client_cache.set(key, client)
         model = normalize_provider_model(
             credentials.provider,
             request.model.rsplit("/", 1)[-1],

@@ -30,9 +30,31 @@ def test_classify_rate_limit() -> None:
     assert result.retryable is True
 
 
-def test_classify_401() -> None:
+def test_classify_401_is_non_retryable() -> None:
+    # 401 / 403 are auth failures — retrying against the same credentials cannot
+    # recover; they should be terminal so callers know to refresh credentials.
     result = classify_error(Exception("401 Unauthorized"))
+    assert result.retryable is False
+
+
+def test_classify_403_is_non_retryable() -> None:
+    result = classify_error(Exception("403 Forbidden"))
+    assert result.retryable is False
+
+
+def test_classify_real_5xx_still_retryable() -> None:
+    result = classify_error(Exception("502 Bad Gateway"))
     assert result.retryable is True
+
+
+def test_classify_no_match_inside_word() -> None:
+    # The broader regex 5\d{2} previously matched substrings like "X500Y";
+    # with \b boundaries it no longer matches when surrounded by word characters.
+    result = classify_error(Exception("modelID500abc not found"))
+    # 401/403/captcha take precedence as non-retryable so we use a neutral string;
+    # this message has no other retryable pattern, so it should fall through to
+    # "unknown" → non-retryable.
+    assert result.retryable is False
 
 
 def test_classify_captcha() -> None:

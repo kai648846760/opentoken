@@ -15,6 +15,7 @@ import httpx
 from opentoken.gateway.normalized import NormalizedChatRequest
 from opentoken.models.model_aliases import normalize_provider_model
 from opentoken.models.provider_credentials import ProviderCredentialRecord
+from opentoken.providers._client_cache import BoundedClientCache
 from opentoken.providers.base import ChatResponse, ProviderAdapter, ProviderRateLimitError
 from opentoken.providers.prompts import stringify_message_content
 from opentoken.providers.web_tool_calling import (
@@ -302,7 +303,7 @@ class DeepSeekWebAdapter(ProviderAdapter):
         client_factory: Callable[[ProviderCredentialRecord], DeepSeekClientProtocol] | None = None,
     ) -> None:
         self._client_factory = client_factory or (lambda credentials: DeepSeekWebClient(credentials))
-        self._client_cache: dict[str, DeepSeekClientProtocol] = {}
+        self._client_cache: BoundedClientCache[DeepSeekClientProtocol] = BoundedClientCache()
 
     def _client_key(self, credentials: ProviderCredentialRecord) -> str:
         auth = credentials.headers.get("authorization", "")
@@ -319,7 +320,7 @@ class DeepSeekWebAdapter(ProviderAdapter):
         client = self._client_cache.get(key)
         if client is None:
             client = self._client_factory(credentials)
-            self._client_cache[key] = client
+            self._client_cache.set(key, client)
         model = normalize_provider_model(credentials.provider, request.model.rsplit("/", 1)[-1])
         if request_uses_web_tools(request):
             parsed_content, tool_calls, finish_reason = complete_web_tool_roundtrip(
@@ -354,7 +355,7 @@ class DeepSeekWebAdapter(ProviderAdapter):
         client = self._client_cache.get(key)
         if client is None:
             client = self._client_factory(credentials)
-            self._client_cache[key] = client
+            self._client_cache.set(key, client)
         model = normalize_provider_model(credentials.provider, request.model.rsplit("/", 1)[-1])
         stream_method = getattr(client, "iter_chat_completion_text", None)
         if not callable(stream_method):

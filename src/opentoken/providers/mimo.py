@@ -12,6 +12,7 @@ import httpx
 from opentoken.gateway.normalized import NormalizedChatRequest
 from opentoken.models.model_aliases import normalize_provider_model
 from opentoken.models.provider_credentials import ProviderCredentialRecord
+from opentoken.providers._client_cache import BoundedClientCache
 from opentoken.providers.base import ChatResponse, ProviderAdapter
 from opentoken.providers.prompts import build_role_prompt
 from opentoken.providers.web_tool_calling import (
@@ -130,7 +131,7 @@ class MimoWebAdapter(ProviderAdapter):
         client_factory: Callable[[ProviderCredentialRecord], MimoWebClient] | None = None,
     ) -> None:
         self._client_factory = client_factory or (lambda credentials: MimoWebClient(credentials))
-        self._client_cache: dict[str, MimoWebClient] = {}
+        self._client_cache: BoundedClientCache[MimoWebClient] = BoundedClientCache()
 
     def _client_key(self, credentials: ProviderCredentialRecord) -> str:
         return f"{credentials.provider}:{credentials.cookie}:{credentials.user_agent}"
@@ -148,7 +149,7 @@ class MimoWebAdapter(ProviderAdapter):
         client = self._client_cache.get(key)
         if client is None:
             client = self._client_factory(credentials)
-            self._client_cache[key] = client
+            self._client_cache.set(key, client)
         model = normalize_provider_model(
             credentials.provider,
             request.model.rsplit("/", 1)[-1],
@@ -190,7 +191,7 @@ class MimoWebAdapter(ProviderAdapter):
         client = self._client_cache.get(key)
         if client is None:
             client = self._client_factory(credentials)
-            self._client_cache[key] = client
+            self._client_cache.set(key, client)
         model = normalize_provider_model(
             credentials.provider,
             request.model.rsplit("/", 1)[-1],

@@ -11,6 +11,7 @@ import httpx
 
 from opentoken.gateway.normalized import NormalizedChatRequest
 from opentoken.models.provider_credentials import ProviderCredentialRecord
+from opentoken.providers._client_cache import BoundedClientCache
 from opentoken.providers.base import ChatResponse, ProviderAdapter, ProviderRateLimitError
 from opentoken.providers.prompts import build_doubao_prompt
 
@@ -281,6 +282,15 @@ class DoubaoWebAdapter(ProviderAdapter):
         client_factory: Callable[[ProviderCredentialRecord], DoubaoWebClient] | None = None,
     ) -> None:
         self._client_factory = client_factory or (lambda credentials: DoubaoWebClient(credentials))
+        self._client_cache: BoundedClientCache[DoubaoWebClient] = BoundedClientCache()
+
+    def _get_client(self, credentials: ProviderCredentialRecord) -> DoubaoWebClient:
+        key = f"{credentials.provider}:{credentials.cookie}:{credentials.user_agent}"
+        client = self._client_cache.get(key)
+        if client is None:
+            client = self._client_factory(credentials)
+            self._client_cache.set(key, client)
+        return client
 
     def chat(
         self,
@@ -289,7 +299,7 @@ class DoubaoWebAdapter(ProviderAdapter):
     ) -> ChatResponse:
         if credentials is None:
             raise RuntimeError("Missing Doubao credentials. Run `opentoken login doubao` first.")
-        client = self._client_factory(credentials)
+        client = self._get_client(credentials)
         content = client.chat_completion(
             message=build_doubao_prompt(request),
             model=request.model.rsplit("/", 1)[-1],
@@ -303,7 +313,7 @@ class DoubaoWebAdapter(ProviderAdapter):
     ) -> Iterator[str] | None:
         if credentials is None:
             raise RuntimeError("Missing Doubao credentials. Run `opentoken login doubao` first.")
-        client = self._client_factory(credentials)
+        client = self._get_client(credentials)
         stream_method = getattr(client, "iter_chat_completion_text", None)
         if not callable(stream_method):
             return None

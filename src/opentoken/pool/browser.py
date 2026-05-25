@@ -71,7 +71,13 @@ class BrowserLauncher:
         """Check if the browser is still running."""
         if self._browser is None:
             return False
-        try:
-            return not getattr(self._browser, "is_closed", True)
-        except Exception:
-            return False
+        is_closed = getattr(self._browser, "is_closed", None)
+        if callable(is_closed):
+            try:
+                return not bool(is_closed())
+            except Exception:
+                return False
+        # Some browser context objects expose `is_closed` as a property/attribute instead of a method.
+        if isinstance(is_closed, bool):
+            return not is_closed
+        return True

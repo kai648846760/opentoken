@@ -17,6 +17,7 @@ import httpx
 
 from opentoken.gateway.normalized import NormalizedChatRequest
 from opentoken.models.provider_credentials import ProviderCredentialRecord
+from opentoken.providers._client_cache import BoundedClientCache
 from opentoken.providers.base import ChatResponse, ProviderAdapter
 from opentoken.providers.prompts import build_role_prompt
 
@@ -404,7 +405,7 @@ class GLMWebAdapter(ProviderAdapter):
         self._client_factory = client_factory or (
             lambda credentials: GLMApiClient(credentials)
         )
-        self._client_cache: dict[str, GLMApiClient] = {}
+        self._client_cache: BoundedClientCache[GLMApiClient] = BoundedClientCache()
 
     def _client_key(self, credentials: ProviderCredentialRecord) -> str:
         return f"{credentials.provider}:{credentials.cookie}:{credentials.user_agent}"
@@ -420,7 +421,7 @@ class GLMWebAdapter(ProviderAdapter):
         client = self._client_cache.get(key)
         if client is None:
             client = self._client_factory(credentials)
-            self._client_cache[key] = client
+            self._client_cache.set(key, client)
         content = client.chat_completion(
             message=build_role_prompt(request),
             model=request.model.rsplit("/", 1)[-1],
@@ -438,7 +439,7 @@ class GLMWebAdapter(ProviderAdapter):
         client = self._client_cache.get(key)
         if client is None:
             client = self._client_factory(credentials)
-            self._client_cache[key] = client
+            self._client_cache.set(key, client)
         stream_method = getattr(client, "iter_chat_completion_text", None)
         if not callable(stream_method):
             return None
@@ -871,6 +872,15 @@ class GLMIntlWebAdapter(ProviderAdapter):
         self._client_factory = client_factory or (
             lambda credentials: GLMIntlApiClient(credentials)
         )
+        self._client_cache: BoundedClientCache[GLMIntlApiClient] = BoundedClientCache()
+
+    def _get_client(self, credentials: ProviderCredentialRecord) -> GLMIntlApiClient:
+        key = f"{credentials.provider}:{credentials.cookie}:{credentials.user_agent}"
+        client = self._client_cache.get(key)
+        if client is None:
+            client = self._client_factory(credentials)
+            self._client_cache.set(key, client)
+        return client
 
     def chat(
         self,
@@ -879,7 +889,7 @@ class GLMIntlWebAdapter(ProviderAdapter):
     ) -> ChatResponse:
         if credentials is None:
             raise RuntimeError("Missing GLM Intl credentials. Run `opentoken login glm international` first.")
-        client = self._client_factory(credentials)
+        client = self._get_client(credentials)
         content = client.chat_completion(
             message=build_role_prompt(request),
             model=request.model.rsplit("/", 1)[-1],
@@ -893,7 +903,7 @@ class GLMIntlWebAdapter(ProviderAdapter):
     ) -> Iterator[str] | None:
         if credentials is None:
             raise RuntimeError("Missing GLM Intl credentials. Run `opentoken login glm international` first.")
-        client = self._client_factory(credentials)
+        client = self._get_client(credentials)
         stream_method = getattr(client, "iter_chat_completion_text", None)
         if not callable(stream_method):
             return None

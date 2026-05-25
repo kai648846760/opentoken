@@ -15,6 +15,7 @@ from opentoken.config.paths import resolve_state_dir
 from opentoken.gateway.normalized import NormalizedChatRequest
 from opentoken.models.model_aliases import normalize_provider_model
 from opentoken.models.provider_credentials import ProviderCredentialRecord
+from opentoken.providers._client_cache import BoundedClientCache
 from opentoken.providers.base import ChatResponse, ProviderAdapter
 from opentoken.providers.prompts import build_qwen_prompt
 from opentoken.providers.web_tool_calling import (
@@ -52,21 +53,30 @@ class QwenApiClient:
         }
 
     def _ensure_chat_id(self) -> None:
-        """Start a fresh upstream chat for each OpenAI-compatible request."""
+        """Start a fresh upstream chat for each OpenAI-compatible request.
+
+        If Qwen rejects creation (401 typically means the saved cookie is dead),
+        raise — silently rebuilding the httpx.Client here used to mask the failure
+        so callers proceeded with an empty chat_id and got non-deterministic responses.
+        """
         response = self._client.post(
             f"{self._base_url}/api/v2/chats/new",
             headers=self.build_headers(),
             json={},
         )
-        if response.status_code != 401:
-            response.raise_for_status()
-            data = response.json()
-            chat_id = data.get("data", {}).get("id") or data.get("data", {}).get("chat_id")
-            if isinstance(chat_id, str) and chat_id:
-                self._chat_id = chat_id
-                return
-        # Fallback: try with fresh client
-        self._client = httpx.Client(timeout=60.0, trust_env=False)
+        if response.status_code == 401:
+            raise RuntimeError(
+                "Qwen credentials expired or invalid. Run `opentoken login qwen` again."
+            )
+        response.raise_for_status()
+        data = response.json()
+        chat_id = data.get("data", {}).get("id") or data.get("data", {}).get("chat_id")
+        if not isinstance(chat_id, str) or not chat_id:
+            raise RuntimeError(
+                f"Qwen returned no chat id (status={response.status_code}). "
+                "Run `opentoken login qwen` to refresh the session."
+            )
+        self._chat_id = chat_id
 
     def _build_payload(self, *, chat_id: str, message: str, model: str, fid: str) -> dict[str, object]:
         return {
@@ -234,6 +244,18 @@ class QwenWebAdapter(ProviderAdapter):
             lambda credentials: QwenApiClient(credentials, base_url=base_url)
         )
         self._stream_client_factory = stream_client_factory
+        self._client_cache: BoundedClientCache[QwenApiClient] = BoundedClientCache()
+
+    def _client_key(self, credentials: ProviderCredentialRecord) -> str:
+        return f"{credentials.provider}:{credentials.cookie}:{credentials.user_agent}"
+
+    def _get_client(self, credentials: ProviderCredentialRecord) -> QwenApiClient:
+        key = self._client_key(credentials)
+        client = self._client_cache.get(key)
+        if client is None:
+            client = self._client_factory(credentials)
+            self._client_cache.set(key, client)
+        return client
 
     def chat(
         self,
@@ -242,7 +264,7 @@ class QwenWebAdapter(ProviderAdapter):
     ) -> ChatResponse:
         if credentials is None:
             raise RuntimeError("Missing Qwen credentials. Run `opentoken login qwen international` first.")
-        client = self._client_factory(credentials)
+        client = self._get_client(credentials)
         model = normalize_provider_model(
             credentials.provider,
             request.model.rsplit("/", 1)[-1],
@@ -284,7 +306,7 @@ class QwenWebAdapter(ProviderAdapter):
                     message=build_qwen_prompt(request),
                     model=model,
                 )
-        client = self._client_factory(credentials)
+        client = self._get_client(credentials)
         return client.iter_chat_completion_text(
             message=build_qwen_prompt(request),
             model=model,
@@ -554,7 +576,7 @@ class QwenCnWebAdapter(ProviderAdapter):
         self._client_factory = client_factory or (
             lambda credentials: QwenCnApiClient(credentials)
         )
-        self._client_cache: dict[str, QwenCnApiClient] = {}
+        self._client_cache: BoundedClientCache[QwenCnApiClient] = BoundedClientCache()
 
     def _client_key(self, credentials: ProviderCredentialRecord) -> str:
         return f"{credentials.provider}:{credentials.cookie}:{credentials.user_agent}"
@@ -570,7 +592,7 @@ class QwenCnWebAdapter(ProviderAdapter):
         client = self._client_cache.get(key)
         if client is None:
             client = self._client_factory(credentials)
-            self._client_cache[key] = client
+            self._client_cache.set(key, client)
         model = normalize_provider_model(
             credentials.provider,
             request.model.rsplit("/", 1)[-1],
@@ -604,7 +626,7 @@ class QwenCnWebAdapter(ProviderAdapter):
         client = self._client_cache.get(key)
         if client is None:
             client = self._client_factory(credentials)
-            self._client_cache[key] = client
+            self._client_cache.set(key, client)
         model = normalize_provider_model(
             credentials.provider,
             request.model.rsplit("/", 1)[-1],

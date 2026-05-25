@@ -13,6 +13,7 @@ from opentoken.config.paths import resolve_state_dir
 from opentoken.gateway.normalized import NormalizedChatRequest
 from opentoken.models.model_aliases import normalize_provider_model
 from opentoken.models.provider_credentials import ProviderCredentialRecord
+from opentoken.providers._client_cache import BoundedClientCache
 from opentoken.providers.base import ChatResponse, ProviderAdapter
 from opentoken.providers.prompts import build_role_prompt
 from opentoken.storage.provider_sessions import load_provider_session, save_provider_session
@@ -165,7 +166,7 @@ class ChatGPTWebAdapter(ProviderAdapter):
         self._client_factory = client_factory or (
             lambda credentials: ChatGPTApiClient(credentials)
         )
-        self._client_cache: dict[str, ChatGPTApiClient] = {}
+        self._client_cache: BoundedClientCache[ChatGPTApiClient] = BoundedClientCache()
 
     def _client_key(self, credentials: ProviderCredentialRecord) -> str:
         return (
@@ -184,7 +185,7 @@ class ChatGPTWebAdapter(ProviderAdapter):
         client = self._client_cache.get(key)
         if client is None:
             client = self._client_factory(credentials)
-            self._client_cache[key] = client
+            self._client_cache.set(key, client)
         model = normalize_provider_model(
             credentials.provider,
             request.model.rsplit("/", 1)[-1],
@@ -226,7 +227,7 @@ class ChatGPTWebAdapter(ProviderAdapter):
         client = self._client_cache.get(key)
         if client is None:
             client = self._client_factory(credentials)
-            self._client_cache[key] = client
+            self._client_cache.set(key, client)
         model = normalize_provider_model(
             credentials.provider,
             request.model.rsplit("/", 1)[-1],

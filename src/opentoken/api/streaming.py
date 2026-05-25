@@ -104,6 +104,10 @@ class ProtocolMarkupProjector:
     def visible_text(self) -> str:
         return self._visible_text
 
+    @property
+    def raw_text(self) -> str:
+        return self._raw_text
+
     def push(self, piece: str) -> str:
         if not piece:
             return ""

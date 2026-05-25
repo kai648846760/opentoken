@@ -11,6 +11,7 @@ import httpx
 from opentoken.gateway.normalized import NormalizedChatRequest
 from opentoken.models.model_aliases import normalize_provider_model
 from opentoken.models.provider_credentials import ProviderCredentialRecord
+from opentoken.providers._client_cache import BoundedClientCache
 from opentoken.providers.base import ChatResponse, ProviderAdapter
 from opentoken.providers.prompts import build_role_prompt
 from opentoken.providers.web_tool_calling import (
@@ -46,24 +47,11 @@ class GrokApiClient:
             "Origin": self._base_url,
         }
 
-    def _get_or_create_conversation(self) -> str | None:
-        """Get existing conversation or create a new one."""
-        # Try to get existing conversation
-        response = self._client.get(
-            f"{self._base_url}/rest/app-chat/conversations?limit=1",
-            headers=self.build_headers(),
-        )
-        if response.status_code == 200:
-            try:
-                data = response.json()
-                conv_id = data.get("conversations", [{}])[0].get("conversationId")
-                if isinstance(conv_id, str) and conv_id:
-                    self._conversation_id = conv_id
-                    return conv_id
-            except Exception:
-                pass
-
-        # Create new conversation
+    def _create_conversation(self) -> str | None:
+        """Create a fresh conversation. Never reuse an existing one, since a single
+        GrokApiClient is shared across requests in a multi-tenant gateway and reusing
+        whatever happens to be the first conversation on the account would cross-pollute
+        message history between unrelated callers."""
         response = self._client.post(
             f"{self._base_url}/rest/app-chat/conversations",
             headers=self.build_headers(),
@@ -81,9 +69,9 @@ class GrokApiClient:
         return None
 
     def chat_completion(self, *, message: str, model: str) -> str:
-        # Ensure we have a conversation ID
-        if not self._conversation_id:
-            self._get_or_create_conversation()
+        # Always start a fresh conversation per request to prevent context leakage.
+        self._conversation_id = None
+        self._create_conversation()
 
         response = self._client.post(
             f"{self._base_url}/rest/app-chat/conversations/{self._conversation_id}/message",
@@ -104,7 +92,7 @@ class GrokApiClient:
         # Handle 401
         if response.status_code == 401:
             self._conversation_id = None
-            self._get_or_create_conversation()
+            self._create_conversation()
             if self._conversation_id:
                 response = self._client.post(
                     f"{self._base_url}/rest/app-chat/conversations/{self._conversation_id}/message",
@@ -129,8 +117,9 @@ class GrokApiClient:
         return content
 
     def iter_chat_completion_text(self, *, message: str, model: str) -> Iterator[str]:
-        if not self._conversation_id:
-            self._get_or_create_conversation()
+        # Always start a fresh conversation per request (see chat_completion).
+        self._conversation_id = None
+        self._create_conversation()
         with self._client.stream(
             "POST",
             f"{self._base_url}/rest/app-chat/conversations/{self._conversation_id}/message",
@@ -149,7 +138,7 @@ class GrokApiClient:
         ) as response:
             if response.status_code == 401:
                 self._conversation_id = None
-                self._get_or_create_conversation()
+                self._create_conversation()
                 if not self._conversation_id:
                     response.raise_for_status()
                 with self._client.stream(
@@ -184,7 +173,7 @@ class GrokWebAdapter(ProviderAdapter):
         self._client_factory = client_factory or (
             lambda credentials: GrokApiClient(credentials)
         )
-        self._client_cache: dict[str, GrokApiClient] = {}
+        self._client_cache: BoundedClientCache[GrokApiClient] = BoundedClientCache()
 
     def _client_key(self, credentials: ProviderCredentialRecord) -> str:
         return f"{credentials.provider}:{credentials.cookie}:{credentials.user_agent}"
@@ -200,7 +189,7 @@ class GrokWebAdapter(ProviderAdapter):
         client = self._client_cache.get(key)
         if client is None:
             client = self._client_factory(credentials)
-            self._client_cache[key] = client
+            self._client_cache.set(key, client)
         model = normalize_provider_model(
             credentials.provider,
             request.model.rsplit("/", 1)[-1],
@@ -242,7 +231,7 @@ class GrokWebAdapter(ProviderAdapter):
         client = self._client_cache.get(key)
         if client is None:
             client = self._client_factory(credentials)
-            self._client_cache[key] = client
+            self._client_cache.set(key, client)
         model = normalize_provider_model(
             credentials.provider,
             request.model.rsplit("/", 1)[-1],
@@ -280,6 +269,7 @@ def _parse_grok_sse_text(payload: str) -> str:
             continue
 
         # Standard OpenAI-like format
+        appended_from_choice = False
         choices = data.get("choices")
         if isinstance(choices, list) and choices:
             choice = choices[0]
@@ -289,11 +279,15 @@ def _parse_grok_sse_text(payload: str) -> str:
                     content = delta.get("content") or delta.get("text")
                     if isinstance(content, str):
                         chunks.append(content)
+                        appended_from_choice = True
 
-        # Grok-specific: text/content fields
-        text = data.get("text") or data.get("content") or data.get("delta")
-        if isinstance(text, str) and text:
-            chunks.append(text)
+        # Grok-specific: text/content fields. Only fall back to these if we did NOT
+        # already append from choices.delta — some Grok models echo the same payload
+        # in both, which would otherwise produce duplicated text.
+        if not appended_from_choice:
+            text = data.get("text") or data.get("content") or data.get("delta")
+            if isinstance(text, str) and text:
+                chunks.append(text)
 
     return "".join(chunks)
 

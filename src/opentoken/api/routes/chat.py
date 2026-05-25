@@ -19,6 +19,7 @@ from opentoken.api.streaming import (
 from opentoken.gateway.normalized import normalize_chat_completions_request
 from opentoken.gateway.router import get_default_router
 from opentoken.providers.base import ProviderRateLimitError
+from opentoken.providers.web_tool_calling import parse_web_tool_response
 
 router = APIRouter()
 
@@ -160,6 +161,46 @@ def _stream_chat_completion(
                             ],
                         }
                         yield f"data: {json.dumps(content_chunk, separators=(',', ':'))}\n\n"
+                # After the upstream stream completes, look at the full raw text we
+                # accumulated: providers emit <tool_calls>…</tool_calls> markup that the
+                # projector strips from visible output. If tools were involved we still
+                # need to surface them as deltas, or downstream OpenAI clients will
+                # never see the model's tool invocation.
+                stream_tool_calls: list[dict[str, object]] = []
+                stream_finish_reason = "stop"
+                try:
+                    _, parsed_tool_calls, parsed_finish_reason = parse_web_tool_response(
+                        projector.raw_text,
+                        available_tools=request.tools if request.tools else None,
+                        tool_choice=request.tool_choice,
+                    )
+                    if parsed_tool_calls:
+                        stream_tool_calls = parsed_tool_calls
+                        stream_finish_reason = parsed_finish_reason or "tool_calls"
+                    elif parsed_finish_reason:
+                        stream_finish_reason = parsed_finish_reason
+                except Exception:
+                    # Parser failures should not corrupt the stream; fall through with
+                    # finish_reason=stop and no tool_calls.
+                    pass
+
+                if stream_tool_calls:
+                    for tool_delta in _iter_stream_tool_call_deltas(stream_tool_calls):
+                        tool_chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": request.model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"tool_calls": tool_delta},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        yield f"data: {json.dumps(tool_chunk, separators=(',', ':'))}\n\n"
+
                 final_chunk = {
                     "id": completion_id,
                     "object": "chat.completion.chunk",
@@ -169,7 +210,7 @@ def _stream_chat_completion(
                         {
                             "index": 0,
                             "delta": {},
-                            "finish_reason": "stop",
+                            "finish_reason": stream_finish_reason,
                         }
                     ],
                 }
