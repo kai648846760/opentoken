@@ -106,6 +106,12 @@ class GeminiApiClient:
                     params=params,
                     content=f"f.req={json.dumps([[message]])}",
                 ) as retry:
+                    # A persistent 401/403 on the retry means the session is
+                    # actually dead — map it to an auth error (re-login) instead
+                    # of letting raise_for_status surface a generic 502.
+                    raise_for_provider_auth(
+                        retry.status_code, provider="Gemini", login_command="opentoken login gemini"
+                    )
                     retry.raise_for_status()
                     yield from _iter_gemini_response(retry.iter_lines())
                     return

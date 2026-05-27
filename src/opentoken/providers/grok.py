@@ -71,7 +71,14 @@ class GrokApiClient:
     def chat_completion(self, *, message: str, model: str) -> str:
         # Always start a fresh conversation per request to prevent context leakage.
         self._conversation_id = None
-        self._create_conversation()
+        if not self._create_conversation():
+            # Conversation creation failed (overwhelmingly a dead session).
+            # Raise an auth-flavored error instead of POSTing to
+            # `/conversations/None/message`, which would 404 → generic 502.
+            raise RuntimeError(
+                "Grok could not create a conversation; the session may be expired. "
+                "Run `opentoken login grok` to refresh."
+            )
 
         response = self._client.post(
             f"{self._base_url}/rest/app-chat/conversations/{self._conversation_id}/message",
@@ -122,7 +129,11 @@ class GrokApiClient:
     def iter_chat_completion_text(self, *, message: str, model: str) -> Iterator[str]:
         # Always start a fresh conversation per request (see chat_completion).
         self._conversation_id = None
-        self._create_conversation()
+        if not self._create_conversation():
+            raise RuntimeError(
+                "Grok could not create a conversation; the session may be expired. "
+                "Run `opentoken login grok` to refresh."
+            )
         with self._client.stream(
             "POST",
             f"{self._base_url}/rest/app-chat/conversations/{self._conversation_id}/message",
@@ -143,7 +154,15 @@ class GrokApiClient:
                 self._conversation_id = None
                 self._create_conversation()
                 if not self._conversation_id:
+                    # Couldn't re-establish a conversation after the 401: the
+                    # session is dead. Map to an auth error (re-login) rather
+                    # than raise_for_status's generic HTTPStatusError (→ 502),
+                    # and never build a `/conversations/None/message` URL.
+                    raise_for_provider_auth(
+                        response.status_code, provider="Grok", login_command="opentoken login grok"
+                    )
                     response.raise_for_status()
+                    return
                 with self._client.stream(
                     "POST",
                     f"{self._base_url}/rest/app-chat/conversations/{self._conversation_id}/message",
