@@ -148,3 +148,51 @@ def test_unified_proxy_raises_when_litellm_missing(monkeypatch):
 
     with pytest.raises(RuntimeError, match="litellm is not installed"):
         up.UnifiedProxyAdapter().chat(_request("unified/openrouter/x"), _credentials())
+
+
+def test_stream_unified_emits_content_deltas():
+    from opentoken.providers.unified_proxy import _stream_unified
+
+    def fake_completion(**kwargs):
+        yield {"choices": [{"delta": {"content": "Hel"}}]}
+        yield {"choices": [{"delta": {"content": "lo"}}]}
+
+    litellm = types.SimpleNamespace(completion=fake_completion)
+    chunks = list(
+        _stream_unified(
+            litellm=litellm,
+            model="openrouter/x",
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=None,
+            tools=None,
+            tool_choice=None,
+            api_key=None,
+        )
+    )
+    assert "".join(chunks) == "Hello"
+
+
+def test_stream_unified_raises_on_tool_calls_instead_of_dropping():
+    """Streaming can't carry OpenAI structured tool_call deltas (the interface
+    is Iterator[str]). Rather than silently emit an empty completion, the
+    streamer must fail loudly so the caller retries with stream=false."""
+    from opentoken.providers.unified_proxy import _stream_unified
+
+    def fake_completion(**kwargs):
+        yield {"choices": [{"delta": {"content": None, "tool_calls": [
+            {"index": 0, "function": {"name": "get_weather", "arguments": "{}"}}
+        ]}}]}
+
+    litellm = types.SimpleNamespace(completion=fake_completion)
+    with pytest.raises(RuntimeError, match="tool_calls during streaming"):
+        list(
+            _stream_unified(
+                litellm=litellm,
+                model="openrouter/x",
+                messages=[{"role": "user", "content": "hi"}],
+                temperature=None,
+                tools=[{"type": "function", "function": {"name": "get_weather"}}],
+                tool_choice="auto",
+                api_key=None,
+            )
+        )

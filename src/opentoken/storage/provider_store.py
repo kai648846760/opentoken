@@ -4,7 +4,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from opentoken.storage._atomic import write_json_atomic
+from opentoken.storage._atomic import file_lock, write_json_atomic
 from opentoken.models.provider_credentials import ProviderCredentialRecord
 from opentoken.storage.auth_profiles import (
     delete_auth_profile_record,
@@ -41,8 +41,16 @@ def save_provider_credentials(
         if not ok:
             return None
     target = _provider_path(state_dir, record.provider)
-    write_json_atomic(target, record.model_dump(), sensitive=True)
-    save_auth_profile_record(state_dir, record)
+    # save and delete each update two stores (<provider>.json + the auth-profile
+    # store). Hold a per-provider lock across both so a concurrent re-login and
+    # logout of the same provider can't interleave and leave them diverged
+    # (e.g. json written but profile deleted), which load_provider_credentials
+    # would then read inconsistently. The provider-path lock is always the
+    # OUTER lock in both functions, so there's no ordering deadlock with the
+    # auth-profile store's own internal lock.
+    with file_lock(target):
+        write_json_atomic(target, record.model_dump(), sensitive=True)
+        save_auth_profile_record(state_dir, record)
     return target
 
 
@@ -69,11 +77,12 @@ def list_provider_credentials(state_dir: Path) -> list[ProviderCredentialRecord]
 
 
 def delete_provider_credentials(state_dir: Path, provider: str) -> bool:
-    deleted = delete_auth_profile_record(state_dir, provider)
     target = _provider_path(state_dir, provider)
-    if target.exists():
-        target.unlink()
-        deleted = True
+    with file_lock(target):
+        deleted = delete_auth_profile_record(state_dir, provider)
+        if target.exists():
+            target.unlink()
+            deleted = True
     return deleted
 
 

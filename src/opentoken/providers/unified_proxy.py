@@ -225,21 +225,49 @@ def _stream_unified(
         kwargs["api_key"] = api_key
     stream = litellm.completion(**kwargs)
     for chunk in stream:
+        if _delta_has_tool_calls(chunk):
+            # The stream interface carries plain text (Iterator[str]); it can't
+            # represent OpenAI's structured tool_call deltas. Silently dropping
+            # them gives the client an empty completion and loses the function
+            # invocation entirely. Until the stream interface grows structured
+            # deltas, fail loudly so the caller can retry with stream=false
+            # (the non-stream path returns tool_calls correctly).
+            raise RuntimeError(
+                "unified proxy: backend emitted tool_calls during streaming, which "
+                "is not supported on the streaming path. Retry this request with "
+                "stream=false to receive tool calls."
+            )
         delta = _extract_delta(chunk)
         if delta:
             yield delta
 
 
-def _extract_delta(chunk: object) -> str:
+def _delta_of(chunk: object) -> object | None:
     choices = getattr(chunk, "choices", None) or (
         chunk.get("choices") if isinstance(chunk, dict) else None  # type: ignore[union-attr]
     )
     if not choices:
-        return ""
+        return None
     first = choices[0]
-    delta = getattr(first, "delta", None) or (
+    return getattr(first, "delta", None) or (
         first.get("delta") if isinstance(first, dict) else None
     )
+
+
+def _delta_has_tool_calls(chunk: object) -> bool:
+    delta = _delta_of(chunk)
+    if delta is None:
+        return False
+    tool_calls = (
+        getattr(delta, "tool_calls", None)
+        if not isinstance(delta, dict)
+        else delta.get("tool_calls")
+    )
+    return bool(tool_calls)
+
+
+def _extract_delta(chunk: object) -> str:
+    delta = _delta_of(chunk)
     if delta is None:
         return ""
     content = (
