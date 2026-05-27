@@ -285,3 +285,81 @@ def test_stream_with_chain_reraises_when_all_models_lazy_rate_limit():
     iterator_factory = lambda req: lazy_rate_limited()  # noqa: E731
     with pytest.raises(ProviderRateLimitError):
         stream_with_chain(_request("a"), ["b"], iterator_factory)
+
+
+def test_nim_model_chain_falls_back_through_router(tmp_path, monkeypatch) -> None:
+    """End-to-end: PoolAwareRouter wires run_with_chain into _call_http_provider
+    for NIM. When the first model raises ProviderRateLimitError the router
+    transparently retries the next model in the chain.
+    """
+    import json as _json
+    from opentoken.gateway.router import PoolAwareRouter
+    from opentoken.gateway.normalized import NormalizedChatRequest
+    from opentoken.providers.nim import NimChatAdapter
+    from opentoken.storage.provider_store import save_provider_credentials
+    from opentoken.models.catalog import ModelCatalogEntry
+
+    providers_dir = tmp_path / "providers"
+    save_provider_credentials(
+        providers_dir,
+        ProviderCredentialRecord(
+            provider="nim",
+            kind="api_key",
+            cookie="",
+            headers={},
+            user_agent="",
+            metadata={
+                "api_key": "nvapi-test",
+                # chain: first model rate-limits, second succeeds.
+                "model_chain": _json.dumps(["first-model", "second-model"]),
+            },
+            status="valid",
+        ),
+    )
+
+    calls: list[str] = []
+
+    class FakeNim(NimChatAdapter):
+        def chat(self, request, credentials=None):
+            # Mirror the real adapter: strip algae/nim/ to get the wire-level
+            # model id, then take action on that. The chain replays models in
+            # the form they're configured (bare wire ids), which after the
+            # router populates request.model becomes algae/nim/<id> on the
+            # first attempt and bare <id> on chain fallbacks.
+            from opentoken.providers.nim import _model_id_from_request
+
+            wire = _model_id_from_request(request)
+            calls.append(wire)
+            if wire == "first-model":
+                raise ProviderRateLimitError("NIM 429 on first-model")
+            return ChatResponse(model=request.model, content="hi", finish_reason="stop")
+
+    # The PoolAwareRouter is created with our fake adapter and a stubbed catalog.
+    monkeypatch.setattr(
+        "opentoken.models.openai_compat.load_model_catalog",
+        lambda providers_dir=None: [
+            ModelCatalogEntry(id="algae/nim/first-model", provider="opentoken", name="first"),
+            ModelCatalogEntry(id="algae/nim/second-model", provider="opentoken", name="second"),
+        ],
+    )
+    router = PoolAwareRouter(
+        providers_dir=providers_dir,
+        adapters={"nim": FakeNim()},
+    )
+
+    response = router.chat(
+        NormalizedChatRequest(
+            model="algae/nim/first-model",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    )
+
+    assert response.content == "hi"
+    # The router first tries the requested model (algae/nim/first-model -> wire
+    # "first-model"), gets a 429, then falls back through the chain. Because
+    # "first-model" appears in the chain too, _resolve_attempt_order produces
+    # [algae/nim/first-model, first-model (already-tried via dedupe... actually
+    # it stays since dedupe is on the prefixed form), second-model]; the chain
+    # helper retries until "second-model" succeeds.
+    assert "second-model" in calls
+    assert calls[-1] == "second-model"
