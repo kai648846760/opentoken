@@ -267,15 +267,21 @@ class DeepSeekWebClient:
                     pass
                 response.raise_for_status()
 
-            raw_payload = ""
-            emitted = ""
+            # Incremental parser: process each SSE line once and emit its
+            # delta directly. The previous loop accumulated raw_payload and
+            # re-parsed the entire buffer per line (O(n²)) AND re-scanned it
+            # for error events (O(n²)) AND diffed against `emitted`, which had
+            # its own cascade bug on divergent snapshots. The stateful parser
+            # below sidesteps all three by remembering active_fragment_type
+            # and event_name across lines.
+            parser = _DeepSeekStreamParser()
             for raw_line in response.iter_lines():
-                raw_payload += f"{raw_line}\n"
-                _raise_for_deepseek_sse_error(raw_payload)
-                candidate = _parse_deepseek_sse_text_impl(raw_payload, close_open_think=False)
-                suffix, emitted = _advance_streamed_text_state(emitted, candidate)
-                if suffix:
-                    yield suffix
+                chunk = parser.feed_line(raw_line)
+                if chunk:
+                    yield chunk
+            tail = parser.close()
+            if tail:
+                yield tail
 
     def _request_with_auth_retry(
         self,
@@ -599,15 +605,151 @@ def _parse_deepseek_sse_text_impl(payload: str, *, close_open_think: bool) -> st
     return "".join(chunks)
 
 
-def _advance_streamed_text_state(current: str, candidate: str) -> tuple[str, str]:
-    if not candidate:
-        return "", current
-    if candidate.startswith(current):
-        suffix = candidate[len(current) :]
-        return suffix, candidate
-    if current.startswith(candidate):
-        return "", current
-    return candidate, current + candidate
+class _DeepSeekStreamParser:
+    """Stateful, line-at-a-time DeepSeek SSE parser for the streaming path.
+
+    Mirrors the fragment/think-tag and error-detection semantics of
+    `_parse_deepseek_sse_text_impl` + `_raise_for_deepseek_sse_error`, but
+    keeps `active_fragment_type` / `saw_fragments` / `event_name` as instance
+    state so each line is processed exactly once. The full-buffer functions
+    remain for the non-stream path (called a single time, so no O(n²)); keep
+    the two in sync if the DeepSeek wire format changes.
+    """
+
+    def __init__(self) -> None:
+        self._active_fragment_type: str | None = None
+        self._saw_fragments = False
+        self._event_name = ""
+
+    def feed_line(self, raw_line: str) -> str:
+        line = raw_line.strip()
+        if not line:
+            return ""
+        if line.startswith("event: "):
+            self._event_name = line[7:].strip()
+            return ""
+        if not line.startswith("data: "):
+            return ""
+        data = line[6:].strip()
+        if data == "[DONE]" or not data:
+            return ""
+        try:
+            parsed = json.loads(data)
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(parsed, dict):
+            return ""
+        self._raise_if_error(parsed)
+        chunks: list[str] = []
+        self._extract(parsed, chunks)
+        return "".join(chunks)
+
+    def close(self) -> str:
+        if self._active_fragment_type == "THINK":
+            self._active_fragment_type = None
+            return "</think>"
+        return ""
+
+    def _raise_if_error(self, parsed: dict[str, object]) -> None:
+        if self._event_name not in {"hint", "error"}:
+            return
+        message = str(parsed.get("content") or parsed.get("msg") or parsed.get("message") or "").strip()
+        finish_reason = str(parsed.get("finish_reason") or parsed.get("reason") or "").strip()
+        parsed_type = str(parsed.get("type") or "").strip().lower()
+        if not (message or finish_reason or parsed_type == "error"):
+            return
+        if _is_deepseek_rate_limit(message=message, finish_reason=finish_reason):
+            raise ProviderRateLimitError(f"DeepSeek rate limit: {message or finish_reason}")
+        raise RuntimeError(f"DeepSeek upstream error: {message or finish_reason or 'unknown stream error'}")
+
+    def _switch_fragment(self, fragment_type: str | None, chunks: list[str]) -> None:
+        normalized = (fragment_type or "").strip().upper() or None
+        if normalized not in {"THINK", "RESPONSE"}:
+            if self._active_fragment_type == "THINK":
+                chunks.append("</think>")
+            self._active_fragment_type = None
+            return
+        if normalized == self._active_fragment_type:
+            return
+        if self._active_fragment_type == "THINK":
+            chunks.append("</think>")
+        self._active_fragment_type = normalized
+        if self._active_fragment_type == "THINK":
+            chunks.append("<think>")
+
+    def _append_fragment(self, fragment: dict[str, object], chunks: list[str]) -> None:
+        fragment_type = fragment.get("type")
+        content = fragment.get("content")
+        if fragment_type is None and not isinstance(content, str):
+            self._switch_fragment(None, chunks)
+            return
+        if fragment_type is None:
+            self._switch_fragment("RESPONSE", chunks)
+        else:
+            self._switch_fragment(str(fragment_type), chunks)
+        if isinstance(content, str) and content:
+            chunks.append(content)
+
+    def _extract(self, parsed: dict[str, object], chunks: list[str]) -> None:
+        snapshot = parsed.get("v")
+        if isinstance(snapshot, dict):
+            response = snapshot.get("response", {})
+            if isinstance(response, dict):
+                fragments = response.get("fragments", [])
+                if isinstance(fragments, list):
+                    self._saw_fragments = True
+                    for fragment in fragments:
+                        if isinstance(fragment, dict):
+                            self._append_fragment(fragment, chunks)
+
+        if parsed.get("p") == "response/fragments" and parsed.get("o") == "APPEND":
+            appended_fragments = parsed.get("v", [])
+            if isinstance(appended_fragments, list):
+                self._saw_fragments = True
+                for fragment in appended_fragments:
+                    if isinstance(fragment, dict):
+                        self._append_fragment(fragment, chunks)
+                return
+
+        if parsed.get("p") == "response" and parsed.get("o") == "BATCH":
+            batch_items = parsed.get("v", [])
+            if isinstance(batch_items, list):
+                for item in batch_items:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("p") == "fragments" and item.get("o") == "APPEND":
+                        appended_fragments = item.get("v", [])
+                        if not isinstance(appended_fragments, list):
+                            continue
+                        self._saw_fragments = True
+                        for fragment in appended_fragments:
+                            if isinstance(fragment, dict):
+                                self._append_fragment(fragment, chunks)
+
+        if isinstance(parsed.get("v"), str):
+            path = str(parsed.get("p") or "")
+            if not path and (self._active_fragment_type is not None or not self._saw_fragments):
+                chunks.append(parsed["v"])
+                return
+            if "choices" in path:
+                self._switch_fragment("RESPONSE", chunks)
+                chunks.append(parsed["v"])
+                return
+            if "content" in path and self._active_fragment_type is not None:
+                chunks.append(parsed["v"])
+                return
+
+        if parsed.get("type") == "text" and isinstance(parsed.get("content"), str):
+            self._switch_fragment("RESPONSE", chunks)
+            chunks.append(parsed["content"])
+            return
+
+        choice = (parsed.get("choices") or [{}])[0]
+        if isinstance(choice, dict):
+            delta = choice.get("delta", {})
+            if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+                self._switch_fragment("RESPONSE", chunks)
+                chunks.append(delta["content"])
 
 
 def _normalize_deepseek_pow_answer(answer: int | float) -> int | float:

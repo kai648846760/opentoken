@@ -113,6 +113,46 @@ def test_doubao_web_client_uses_trust_env_false_by_default() -> None:
     assert client._client.trust_env is False
 
 
+def test_parse_gemini_response_concatenates_all_fragments() -> None:
+    """Non-stream path: a buffered multi-fragment SSE response must surface
+    every fragment, not just the first."""
+    from opentoken.providers.gemini import _parse_gemini_response
+
+    payload = 'data: ["hello"]\ndata: [" world"]\ndata: ["!"]\n'
+    assert _parse_gemini_response(payload) == "hello world!"
+
+
+def test_iter_gemini_response_emits_every_data_fragment() -> None:
+    """Multi-fragment Gemini SSE streams must surface ALL fragments. The
+    previous loop kept only the first because _parse_gemini_response returns
+    on the first text-producing line and the cumulative-diff above it could
+    never grow. The new loop emits each fragment's extracted text as the line
+    arrives — O(n) and complete.
+    """
+    from opentoken.providers.gemini import _iter_gemini_response
+
+    lines = [
+        'data: ["hello"]',
+        'data: [" world"]',
+        'data: ["!"]',
+    ]
+    assert list(_iter_gemini_response(iter(lines))) == ["hello", " world", "!"]
+
+
+def test_iter_gemini_response_skips_blank_and_non_data_lines() -> None:
+    from opentoken.providers.gemini import _iter_gemini_response
+
+    lines = [
+        "",
+        ": comment line",
+        "data: ",
+        "data: not-json",
+        'data: ["only-this"]',
+        "",
+    ]
+    assert list(_iter_gemini_response(iter(lines))) == ["only-this"]
+
+
 def test_gemini_api_client_uses_trust_env_false_by_default() -> None:
     credentials = ProviderCredentialRecord(
         provider="gemini",

@@ -214,7 +214,10 @@ def _parse_gemini_response(payload: str) -> str:
     """
     # Gemini responses are typically in format: ["prefix", "[[[\"content\"]]"]\n"]
     try:
-        # Try to find JSON-like content
+        # Concatenate the text fragment from every `data:` line. Returning on
+        # the first non-empty fragment (the old behavior) truncated multi-
+        # fragment responses to their opening piece.
+        fragments: list[str] = []
         for line in payload.splitlines():
             line = line.strip()
             if not line.startswith("data: "):
@@ -230,12 +233,11 @@ def _parse_gemini_response(payload: str) -> str:
                 continue
 
             if isinstance(parsed, list) and parsed:
-                # First element is typically the response
                 text = _extract_text_from_gemini_array(parsed)
                 if text:
-                    return text
+                    fragments.append(text)
 
-        return ""
+        return "".join(fragments)
     except Exception:
         return ""
 
@@ -253,22 +255,24 @@ def _extract_text_from_gemini_array(arr: list) -> str:
 
 
 def _iter_gemini_response(lines: Iterator[str]) -> Iterator[str]:
-    emitted = ""
-    raw_payload = ""
+    # Each Gemini SSE `data:` line carries one nested-array fragment. Emit each
+    # fragment's text as the line arrives. The previous loop accumulated the
+    # whole buffer and re-parsed it per line (O(n²)) AND relied on
+    # _parse_gemini_response returning the cumulative text — but that helper
+    # returns on the FIRST text-producing line, so the cumulative-diff could
+    # never grow and every fragment after the first was silently dropped.
     for raw_line in lines:
-        raw_payload += f"{raw_line}\n"
-        candidate = _parse_gemini_response(raw_payload)
-        suffix, emitted = _advance_streamed_text_state(emitted, candidate)
-        if suffix:
-            yield suffix
-
-
-def _advance_streamed_text_state(current: str, candidate: str) -> tuple[str, str]:
-    if not candidate:
-        return "", current
-    if candidate.startswith(current):
-        suffix = candidate[len(current) :]
-        return suffix, candidate
-    if current.startswith(candidate):
-        return "", current
-    return candidate, current + candidate
+        line = raw_line.strip()
+        if not line.startswith("data: "):
+            continue
+        data_str = line[6:].strip()
+        if not data_str:
+            continue
+        try:
+            parsed = json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, list) and parsed:
+            text = _extract_text_from_gemini_array(parsed)
+            if text:
+                yield text
