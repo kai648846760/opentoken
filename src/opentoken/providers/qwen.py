@@ -16,7 +16,7 @@ from opentoken.gateway.normalized import NormalizedChatRequest
 from opentoken.models.model_aliases import normalize_provider_model
 from opentoken.models.provider_credentials import ProviderCredentialRecord
 from opentoken.providers._client_cache import BoundedClientCache
-from opentoken.providers.base import ChatResponse, ProviderAdapter
+from opentoken.providers.base import ChatResponse, ProviderAdapter, raise_for_provider_auth
 from opentoken.providers.prompts import build_qwen_prompt
 from opentoken.providers.web_tool_calling import (
     complete_web_tool_roundtrip,
@@ -129,6 +129,9 @@ class QwenApiClient:
                 json=payload,
             )
 
+        raise_for_provider_auth(
+            response.status_code, provider="Qwen", login_command="opentoken login qwen"
+        )
         response.raise_for_status()
         return response.text
 
@@ -446,6 +449,9 @@ class QwenCnApiClient:
                 json=payload,
             )
 
+        raise_for_provider_auth(
+            response.status_code, provider="Qwen", login_command="opentoken login qwen"
+        )
         response.raise_for_status()
         response_text = response.text
         if allow_outline_fallback and _qwen_cn_payload_indicates_outline_workflow(response_text):
