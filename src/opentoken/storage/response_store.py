@@ -99,5 +99,10 @@ def _load_store(path: Path) -> dict[str, object]:
 
 
 def _save_store(path: Path, store: dict[str, object]) -> None:
+    # sensitive=True (0600): this store holds the full conversation history
+    # (user prompts + assistant responses) addressable by previous_response_id.
+    # User prompts can contain secrets (API keys pasted into a question, PII,
+    # work-in-progress code); 0644 would let any other local user on a shared
+    # host read them.
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_json_atomic(path, store)
+    write_json_atomic(path, store, sensitive=True)

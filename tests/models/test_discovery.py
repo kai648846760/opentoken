@@ -314,3 +314,65 @@ def test_load_model_catalog_runs_discoverers_concurrently_and_isolates_failures(
     # started. (boom raises before recording, so it's not in call_starts.)
     started = {name for name, _ in call_starts}
     assert started == {"good_a", "good_b"}
+
+
+def test_load_model_catalog_returns_at_deadline_despite_hung_discoverer(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A discoverer that never returns must not hold /v1/models hostage. The
+    loader breaks at the wall-clock deadline and shuts the executor down
+    without waiting (shutdown(wait=False, cancel_futures=True)); the naive
+    `with ThreadPoolExecutor` form would block on shutdown(wait=True) until the
+    hung discoverer finished, defeating the deadline.
+    """
+    import threading
+    import time as time_module
+
+    monkeypatch.setattr("opentoken.models.discovery._DISCOVERY_PASS_DEADLINE_SECONDS", 0.5)
+
+    release = threading.Event()
+
+    def _stub_creds(provider: str) -> ProviderCredentialRecord:
+        return ProviderCredentialRecord(
+            provider=provider, kind="web_session", cookie="x", headers={},
+            user_agent="ua", metadata={}, status="valid",
+        )
+
+    monkeypatch.setattr(
+        "opentoken.models.discovery.load_provider_credentials",
+        lambda providers_dir, provider: _stub_creds(provider)
+        if provider in {"fast", "hung"}
+        else None,
+    )
+
+    def fast(_credentials, _state_dir):
+        return [("f-1", "F 1")]
+
+    def hung(_credentials, _state_dir):
+        # Block well past the deadline; released in finally so the worker thread
+        # doesn't outlive the test.
+        release.wait(30.0)
+        return [("h-1", "H 1")]
+
+    monkeypatch.setattr(
+        "opentoken.models.discovery._DISCOVERERS",
+        {"fast": fast, "hung": hung},
+    )
+
+    try:
+        start = time_module.monotonic()
+        catalog = load_model_catalog(
+            state_dir=tmp_path,
+            providers_dir=tmp_path / "providers",
+            use_cache=False,
+        )
+        elapsed = time_module.monotonic() - start
+
+        # Returned promptly (deadline 0.5s + scheduling slack), not after 30s.
+        assert elapsed < 5.0, f"load_model_catalog blocked on hung discoverer ({elapsed:.1f}s)"
+        # The fast provider contributed; the hung one simply didn't make it.
+        ids = sorted(entry.id for entry in catalog)
+        assert ids == ["algae/fast/f-1"]
+    finally:
+        release.set()

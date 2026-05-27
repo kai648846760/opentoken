@@ -842,22 +842,39 @@ def load_model_catalog(
             return provider, models
 
         max_workers = min(_DISCOVERY_MAX_WORKERS, len(to_discover))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Manual executor lifecycle with a deadline on as_completed itself.
+        # The naive forms both block past the deadline:
+        #   - `with ThreadPoolExecutor(...) as executor:` calls shutdown(wait=
+        #     True) on __exit__, which waits for in-flight discoverers.
+        #   - Checking `deadline - time.monotonic()` *between* yields of
+        #     `as_completed(futures)` only fires after the next future
+        #     completes; if every remaining discoverer is hung, as_completed
+        #     blocks indefinitely and the deadline never gets checked.
+        # Passing `timeout=` to as_completed raises TimeoutError once the
+        # deadline elapses regardless of in-flight state, and the manual
+        # shutdown(wait=False, cancel_futures=True) lets the request return
+        # now (any still-running discoverer finishes in the background; its
+        # result is dropped this pass and the next request will try again).
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        try:
             futures = {
                 executor.submit(_run, provider, credentials): provider
                 for provider, credentials in to_discover
             }
-            deadline = time.monotonic() + _DISCOVERY_PASS_DEADLINE_SECONDS
-            for future in concurrent.futures.as_completed(futures):
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                try:
-                    provider, models = future.result(timeout=max(remaining, 0.01))
-                except Exception:
-                    continue
-                if models:
-                    discovered_results[provider] = models
+            try:
+                for future in concurrent.futures.as_completed(
+                    futures, timeout=_DISCOVERY_PASS_DEADLINE_SECONDS
+                ):
+                    try:
+                        provider, models = future.result()
+                    except Exception:
+                        continue
+                    if models:
+                        discovered_results[provider] = models
+            except concurrent.futures.TimeoutError:
+                pass
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     # Persist freshly discovered models to the cache.
     if use_cache and discovered_results:

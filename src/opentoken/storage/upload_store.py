@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 from opentoken.storage._atomic import file_lock, write_json_atomic
 from time import time
@@ -90,7 +91,14 @@ def add_upload_part(
             entry["parts"] = parts
         parts.append(part)
         _save_store(path, store)
-        _resolve_part_blob_path(state_dir, upload_id, part_id).write_bytes(content)
+        # 0600 owner-only: upload parts hold user-supplied content (images,
+        # docs, source files) that must not be world-readable on a shared host.
+        blob_path = _resolve_part_blob_path(state_dir, upload_id, part_id)
+        blob_path.write_bytes(content)
+        try:
+            os.chmod(blob_path, 0o600)
+        except OSError:
+            pass
     return copy.deepcopy(part)
 
 

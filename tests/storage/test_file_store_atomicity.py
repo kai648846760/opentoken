@@ -10,8 +10,12 @@ temp file.
 """
 from __future__ import annotations
 
+import stat
+import sys
 import threading
 from pathlib import Path
+
+import pytest
 
 from opentoken.storage import file_store
 
@@ -49,6 +53,24 @@ def test_create_then_delete_leaves_no_orphan_blob(tmp_path: Path) -> None:
     assert file_store.get_file(tmp_path, file_id) is None
     assert not (tmp_path / "files" / f"{file_id}.bin").exists()
     assert list((tmp_path / "files").glob("*.tmp")) == []
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX-only file mode bits")
+def test_create_file_blob_is_owner_only(tmp_path: Path) -> None:
+    """Uploaded content can be sensitive (images, PDFs, source files). The
+    blob must be written 0600 so other local users on a shared host can't
+    read it. Mode-check via stat.S_IMODE — the rename target inherits the
+    chmod we apply to the tmp file before os.replace."""
+    created = file_store.create_file(
+        tmp_path,
+        filename="secret.txt",
+        content=b"private",
+        purpose="assistants",
+        mime_type="text/plain",
+    )
+    blob = tmp_path / "files" / f"{created['id']}.bin"
+    mode = stat.S_IMODE(blob.stat().st_mode)
+    assert mode == 0o600, f"blob is {oct(mode)} — should be 0o600 owner-only"
 
 
 def test_concurrent_creates_all_persist_with_blobs(tmp_path: Path) -> None:
