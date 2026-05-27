@@ -402,3 +402,22 @@ def test_build_web_tool_prompt_supports_responses_style_function_tools() -> None
     prompt = build_web_tool_prompt(request, provider="chatgpt")
 
     assert "- web_search(query: string (required)): Search the web" in prompt
+
+
+def test_balanced_bracket_substring_ignores_trailing_prose() -> None:
+    """Trailing prose with stray brackets must not bleed into the extracted
+    JSON fragment (the old find/rfind grabbed up to the last ']')."""
+    from opentoken.providers.web_tool_calling import _extract_json_container_fragment
+
+    extracted = _extract_json_container_fragment('[{"name":"x","arguments":{}}] note: see [docs]')
+    assert extracted == '[{"name":"x","arguments":{}}]'
+
+
+def test_balanced_bracket_substring_respects_string_brackets() -> None:
+    """A bracket inside a JSON string value must not affect depth counting."""
+    from opentoken.providers.web_tool_calling import _extract_json_container_fragment
+
+    extracted = _extract_json_container_fragment('prefix [{"q":"a [bracketed] phrase"}] suffix')
+    assert extracted == '[{"q":"a [bracketed] phrase"}]'
+    import json as _json
+    assert _json.loads(extracted) == [{"q": "a [bracketed] phrase"}]

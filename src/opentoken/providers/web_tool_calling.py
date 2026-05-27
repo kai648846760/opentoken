@@ -591,14 +591,50 @@ def _extract_json_container_fragment(raw: str) -> str | None:
         if candidate is not None:
             return candidate
 
+    # Balanced-bracket scan: the previous find/rfind approach grabbed the
+    # outermost brackets regardless of nesting or string content, so trailing
+    # prose like `[{...}] note: see [docs]` would extend the candidate into
+    # `[docs]` and produce invalid JSON. Scan forward, tracking depth and
+    # respecting JSON string boundaries so brackets inside "..." are ignored.
     for opening, closing in (("[", "]"), ("{", "}")):
-        start = cleaned.find(opening)
-        end = cleaned.rfind(closing)
-        if start == -1 or end == -1 or end <= start:
-            continue
-        candidate = cleaned[start : end + 1].strip()
+        candidate = _balanced_bracket_substring(cleaned, opening, closing)
         if candidate:
-            return candidate
+            return candidate.strip() or None
+    return None
+
+
+def _balanced_bracket_substring(text: str, open_char: str, close_char: str) -> str | None:
+    start = text.find(open_char)
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        ch = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "[" or ch == "{":
+            depth += 1
+        elif ch == "]" or ch == "}":
+            depth -= 1
+            if depth == 0:
+                # Outermost container closed; succeed only if it matches the
+                # expected closer (otherwise the input had {} mixed where we
+                # wanted [], or vice versa — caller falls through to the other
+                # pair / returns None).
+                if ch == close_char:
+                    return text[start : index + 1]
+                return None
     return None
 
 
