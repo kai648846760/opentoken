@@ -733,3 +733,49 @@ def _collect_streamed_tool_calls(events: list[object]) -> list[dict[str, object]
             if isinstance(arguments, str):
                 current["function"]["arguments"] += arguments
     return [collected[index] for index in sorted(collected)]
+
+
+class MissingCredsRouter:
+    def chat(self, request):
+        raise RuntimeError("Missing deepseek credentials. Run `opentoken login deepseek` first.")
+
+
+class UpstreamFailedRouter:
+    def chat(self, request):
+        raise RuntimeError("All browser workers failed for doubao: page crashed")
+
+
+def test_chat_completions_maps_missing_credentials_to_401(monkeypatch) -> None:
+    monkeypatch.setattr(chat_route_module, "get_default_router", lambda: MissingCredsRouter())
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "algae/deepseek/deepseek-chat",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+    # A provider the user hasn't logged in to is an auth problem, not a malformed
+    # request — must not be 400 invalid_request_error.
+    assert response.status_code == 401
+    assert response.json()["error"]["type"] == "authentication_error"
+
+
+def test_chat_completions_maps_upstream_provider_failure_to_502(monkeypatch) -> None:
+    monkeypatch.setattr(chat_route_module, "get_default_router", lambda: UpstreamFailedRouter())
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "algae/doubao/doubao-seed-2.0",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+    # Worker / upstream failure is a gateway-side error, not a client request
+    # error — 502, not 400.
+    assert response.status_code == 502
+    assert response.json()["error"]["type"] == "api_error"
