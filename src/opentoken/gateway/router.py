@@ -176,8 +176,6 @@ class PoolAwareRouter:
         provider_name: str,
         request: NormalizedChatRequest,
         credentials: object,
-        *,
-        model_lookup_id: str | None = None,
     ) -> ChatResponse:
         """Call an HTTP provider directly."""
         adapter = self._http_adapters.get(provider_name)
