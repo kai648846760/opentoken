@@ -172,3 +172,41 @@ def test_stream_with_chain_returns_iterator_for_first_successful_model():
     assert iterator is not None
     assert list(iterator) == ["hi"]
     assert attempts == ["first", "second"]
+
+
+def test_stream_with_chain_falls_back_on_lazy_rate_limit_during_first_chunk():
+    # Real-world shape: the stream adapter returns a lazy generator whose
+    # upstream HTTP (and 429 detection) only runs on the first __next__().
+    # stream_with_chain must prime that first chunk inside the fallback loop so
+    # the rate-limit triggers a hop to the next model instead of surfacing as a
+    # mid-stream error to the caller.
+    attempts: list[str] = []
+
+    def lazy_rate_limited():
+        raise ProviderRateLimitError("429 on first chunk")
+        yield  # pragma: no cover - makes this a generator
+
+    def good():
+        yield "pong"
+
+    def invoke(req: NormalizedChatRequest):
+        attempts.append(req.model)
+        if req.model == "first":
+            return lazy_rate_limited()
+        return good()
+
+    iterator = stream_with_chain(_request("first"), ["second"], invoke)
+    assert iterator is not None
+    assert list(iterator) == ["pong"]
+    # Both models were invoked: first primed -> 429 -> fell back to second.
+    assert attempts == ["first", "second"]
+
+
+def test_stream_with_chain_reraises_when_all_models_lazy_rate_limit():
+    def lazy_rate_limited():
+        raise ProviderRateLimitError("429")
+        yield  # pragma: no cover
+
+    iterator_factory = lambda req: lazy_rate_limited()  # noqa: E731
+    with pytest.raises(ProviderRateLimitError):
+        stream_with_chain(_request("a"), ["b"], iterator_factory)

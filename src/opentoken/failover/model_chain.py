@@ -128,8 +128,20 @@ def stream_with_chain(
 ) -> Iterator[str] | None:
     """Like run_with_chain but for streaming responses.
 
-    Note: we can only fall back BEFORE any bytes are yielded. Once the stream
-    starts emitting tokens we have to surface the rate-limit error mid-stream.
+    The trick: many stream adapters (e.g. NimChatAdapter -> _stream_nim_chunks)
+    return a LAZY generator from invoke(); the upstream HTTP call and any 429
+    detection don't happen until the consumer's first __next__(). If we simply
+    returned that generator, a rate-limit raised mid-iteration would surface
+    to the caller as a mid-stream error — the chain fallback would never run
+    because stream_with_chain has already returned.
+
+    To make rate-limit fallback actually work for streaming, we prime each
+    candidate iterator inside the chain loop: pull one chunk inside the try.
+    If priming raises ProviderRateLimitError, drop to the next model. Once a
+    model successfully yields a first chunk, we know its HTTP setup succeeded
+    and we return a generator that re-emits the primed chunk followed by the
+    rest of the stream. Once bytes are flowing we can't undo them, so a
+    rate-limit later in the stream still surfaces to the caller.
     """
     attempts = _resolve_attempt_order(request.model, chain)
     if not attempts:
@@ -144,6 +156,25 @@ def stream_with_chain(
             continue
         if iterator is None:
             return None
-        return iterator
+        rest = iter(iterator)
+        try:
+            first_piece = next(rest)
+        except StopIteration:
+            # Successful, just empty.
+            return iter(())
+        except ProviderRateLimitError as exc:
+            logger.info(
+                "model_chain_stream_rate_limited model=%s remaining=%d",
+                model,
+                len(attempts) - attempts.index(model) - 1,
+            )
+            last_exc = exc
+            continue
+        return _replay_with_first(first_piece, rest)
     assert last_exc is not None
     raise last_exc
+
+
+def _replay_with_first(first: str, rest: Iterator[str]) -> Iterator[str]:
+    yield first
+    yield from rest
