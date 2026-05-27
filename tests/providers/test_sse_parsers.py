@@ -8,7 +8,7 @@ tests. Cover the realistic shapes here.
 from __future__ import annotations
 
 from opentoken.providers.grok import _iter_grok_sse_text, _parse_grok_sse_text
-from opentoken.providers.chatgpt import _parse_chatgpt_sse_text
+from opentoken.providers.chatgpt import _advance_streamed_text_state, _parse_chatgpt_sse_text
 
 
 # ── grok ─────────────────────────────────────────────────────────────────────
@@ -90,6 +90,37 @@ def test_parse_chatgpt_sse_text_extracts_content() -> None:
     # must contain "hello world" (the last frame). We don't pin the exact
     # whitespace because the parser dedupes overlapping deltas.
     assert "hello world" in result
+
+
+def test_advance_streamed_text_state_normal_growth() -> None:
+    """Append-only snapshots produce monotonic deltas."""
+    suffix, state = _advance_streamed_text_state("", "hello")
+    assert (suffix, state) == ("hello", "hello")
+    suffix, state = _advance_streamed_text_state(state, "hello world")
+    assert (suffix, state) == (" world", "hello world")
+
+
+def test_advance_streamed_text_state_handles_stale_short_snapshot() -> None:
+    """A re-delivered earlier snapshot is a no-op (no re-emission, state held)."""
+    suffix, state = _advance_streamed_text_state("hello world", "hello")
+    assert (suffix, state) == ("", "hello world")
+
+
+def test_advance_streamed_text_state_divergent_does_not_cascade() -> None:
+    """When a snapshot diverges (regenerate/rewrite), the new baseline must be
+    `candidate` alone — not `current + candidate`. With the buggy concatenation
+    every subsequent extension also fails the prefix check, causing the entire
+    text to be re-emitted on every frame (cascading duplication).
+    """
+    suffix, state = _advance_streamed_text_state("foo", "bar")
+    # Emit the divergent snapshot once, but the baseline must reset to it.
+    assert suffix == "bar"
+    assert state == "bar"
+
+    # A normal extension of `bar` must now produce only its incremental tail —
+    # NOT the whole text again.
+    suffix, state = _advance_streamed_text_state(state, "bar baz")
+    assert (suffix, state) == (" baz", "bar baz")
 
 
 def test_parse_chatgpt_sse_text_handles_done_and_blanks() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 from pathlib import Path
 from time import time
@@ -38,7 +39,17 @@ def create_file(
         "mime_type": mime_type or "application/octet-stream",
     }
     path = _resolve_store_path(state_dir)
+    blob_path = _resolve_blob_path(state_dir, file_id)
     with file_lock(path):
+        # Write blob and commit metadata together under the lock. Without this
+        # a concurrent delete_file between metadata commit and blob write would
+        # leave an orphan .bin (delete's unlink runs while blob doesn't yet
+        # exist, then create's write_bytes lands), and a concurrent reader
+        # would see metadata-but-no-bytes. Atomic tmp+rename for the blob keeps
+        # readers from observing a partial write even within the lock window.
+        tmp_blob = blob_path.with_name(blob_path.name + ".tmp")
+        tmp_blob.write_bytes(content)
+        os.replace(tmp_blob, blob_path)
         store = _load_store(path)
         files = store.setdefault("files", {})
         if not isinstance(files, dict):
@@ -46,7 +57,6 @@ def create_file(
             store["files"] = files
         files[file_id] = copy.deepcopy(metadata)
         _save_store(path, store)
-    _resolve_blob_path(state_dir, file_id).write_bytes(content)
     return copy.deepcopy(metadata)
 
 

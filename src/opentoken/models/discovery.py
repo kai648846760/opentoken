@@ -13,7 +13,7 @@ from opentoken.config.paths import resolve_providers_dir, resolve_state_dir
 from opentoken.models.catalog import ModelCatalogEntry, default_catalog
 from opentoken.models.provider_credentials import ProviderCredentialRecord
 from opentoken.providers.camoufox_clients import CamoufoxProviderClient
-from opentoken.storage._atomic import write_json_atomic
+from opentoken.storage._atomic import file_lock, write_json_atomic
 from opentoken.storage.provider_sessions import credential_fingerprint
 from opentoken.storage.provider_store import load_provider_credentials
 
@@ -112,6 +112,33 @@ def _save_cache(path: Path, payload: dict[str, dict[str, object]]) -> None:
     # both call load_model_catalog → both call _save_cache. Without tmp+rename
     # they can interleave and produce torn JSON that _load_cache then drops.
     write_json_atomic(path, payload)
+
+
+def _persist_discovered_models(
+    cache_path: Path,
+    *,
+    discovered_results: dict[str, list[tuple[str, str]]],
+    creds_by_provider: dict[str, ProviderCredentialRecord],
+    now: float,
+) -> None:
+    """Merge freshly discovered models into the on-disk cache under an
+    exclusive lock. Two concurrent /v1/models passes both read the cache at the
+    top of load_model_catalog and arrive here with disjoint discovered sets;
+    the lock + re-read keeps the later writer from silently clobbering the
+    earlier one's entries (lost update). Atomic tmp+rename alone only prevents
+    torn JSON — it does not serialise read-modify-write.
+    """
+    with file_lock(cache_path):
+        merged = _load_cache(cache_path)
+        for provider, models in discovered_results.items():
+            _store_cached_models(
+                merged,
+                provider=provider,
+                credentials=creds_by_provider[provider],
+                models=models,
+                now=now,
+            )
+        _save_cache(cache_path, merged)
 
 
 def _cache_key(provider: str, credentials: ProviderCredentialRecord) -> str:
@@ -835,15 +862,12 @@ def load_model_catalog(
     # Persist freshly discovered models to the cache.
     if use_cache and discovered_results:
         creds_by_provider = {p: c for p, c in to_discover}
-        for provider, models in discovered_results.items():
-            _store_cached_models(
-                cache,
-                provider=provider,
-                credentials=creds_by_provider[provider],
-                models=models,
-                now=now,
-            )
-        _save_cache(cache_path, cache)
+        _persist_discovered_models(
+            cache_path,
+            discovered_results=discovered_results,
+            creds_by_provider=creds_by_provider,
+            now=now,
+        )
 
     # Floor for logged-in providers whose live discovery yielded nothing this
     # pass (qwen-intl's catalog page is now JS-rendered, Kimi's lives behind a

@@ -196,6 +196,53 @@ def test_load_model_catalog_prefers_live_discovery_over_fallback(
     assert kimi_models == ["algae/kimi/k3"]
 
 
+def test_persist_discovered_models_merges_with_concurrent_writers(tmp_path) -> None:
+    """Lost-update regression: two /v1/models passes both take an empty top-of-
+    function cache snapshot, then each tries to persist its own provider. The
+    later writer must NOT clobber the earlier one's entry — the persist helper
+    re-reads the cache under an exclusive file lock and merges onto the latest
+    on-disk state before writing.
+
+    Simulate the race deterministically: pass A's snapshot was empty; pass B
+    has already written {beta} to disk while A was discovering; A now calls
+    _persist_discovered_models with only its own {alpha} discoveries. Without
+    the merge, the resulting cache would be {alpha}; with it, {alpha, beta}.
+    """
+    from opentoken.models.discovery import _load_cache, _persist_discovered_models
+
+    creds_alpha = ProviderCredentialRecord(
+        provider="alpha", kind="web_session", cookie="x", headers={},
+        user_agent="ua", metadata={}, status="valid",
+    )
+    creds_beta = ProviderCredentialRecord(
+        provider="beta", kind="web_session", cookie="x", headers={},
+        user_agent="ua", metadata={}, status="valid",
+    )
+
+    cache_path = tmp_path / "model-catalog-cache.json"
+
+    # Pass B's write landed first.
+    _persist_discovered_models(
+        cache_path,
+        discovered_results={"beta": [("b1", "B 1")]},
+        creds_by_provider={"beta": creds_beta},
+        now=1000.0,
+    )
+
+    # Pass A's write happens later, but A's in-memory snapshot was empty (the
+    # bug). The merge must still preserve beta from disk.
+    _persist_discovered_models(
+        cache_path,
+        discovered_results={"alpha": [("a1", "A 1")]},
+        creds_by_provider={"alpha": creds_alpha},
+        now=1001.0,
+    )
+
+    on_disk = _load_cache(cache_path)
+    providers_in_cache = sorted(key.split(":", 1)[0] for key in on_disk)
+    assert providers_in_cache == ["alpha", "beta"]
+
+
 def test_load_model_catalog_runs_discoverers_concurrently_and_isolates_failures(
     monkeypatch,
     tmp_path,

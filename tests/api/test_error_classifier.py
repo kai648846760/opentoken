@@ -55,3 +55,20 @@ def test_classify_is_case_insensitive() -> None:
 def test_classify_body_signalled_auth_failures_as_401(message: str) -> None:
     status, error_type = classify_provider_runtime_error(RuntimeError(message))
     assert (status, error_type) == (401, "authentication_error")
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # Non-auth uses of "expired" must NOT route to 401 — sending users into
+        # a pointless re-login loop is worse than reporting an upstream failure.
+        "upstream certificate expired",
+        "TLS handshake failed: server certificate expired 2 days ago",
+        "cache entry expired",
+        "request expired before completion",
+        "deepseek lease expired in the regional pool",
+    ],
+)
+def test_classify_does_not_treat_bare_expired_as_auth_failure(message: str) -> None:
+    status, error_type = classify_provider_runtime_error(RuntimeError(message))
+    assert (status, error_type) == (502, "api_error")

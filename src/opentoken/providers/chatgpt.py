@@ -290,4 +290,12 @@ def _advance_streamed_text_state(current: str, candidate: str) -> tuple[str, str
         return suffix, candidate
     if current.startswith(candidate):
         return "", current
-    return candidate, current + candidate
+    # Divergent snapshot: `candidate` is neither an extension of nor a prefix of
+    # what we've emitted (ChatGPT regenerated / a moderation pass rewrote the
+    # message). We can't un-send the bytes already streamed, so emit the new
+    # snapshot once — but the new baseline must be `candidate`, NOT
+    # `current + candidate`. Concatenating poisons the baseline: the next frame
+    # (an extension of `candidate`) would also fail the prefix test and the
+    # whole text would be re-emitted on every subsequent frame, cascading into
+    # massively duplicated output.
+    return candidate, candidate

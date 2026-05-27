@@ -20,15 +20,22 @@ def classify_provider_runtime_error(exc: RuntimeError) -> tuple[int, str]:
         return 401, "authentication_error"
     # Session / auth-token failures, including the ways providers signal them
     # in a body rather than via HTTP status:
-    #   - "expired" / "re-login" / "refresh the session"   (our own messages)
+    #   - "session/credentials/token expired"               (our own messages)
+    #   - "re-login" / "refresh the session"                (our own messages)
     #   - "unauthenticated" / "invalid_auth_token"          (Kimi gRPC body)
     #   - "no chat id"                                      (Qwen: stale session
     #     can't create a chat — returns 200 with no id)
+    #
+    # NOTE: match "expired" only when paired with an auth subject. Bare
+    # "expired" misclassifies genuine upstream failures like "upstream
+    # certificate expired" or "cache entry expired" as 401, sending clients
+    # into a pointless re-login loop instead of retrying a 502.
     _AUTH_SIGNALS = (
-        "expired",
+        "session expired",
+        "credentials expired",
+        "token expired",
         "re-login",
         "re-log in",
-        "session expired",
         "refresh the session",
         "unauthenticated",
         "invalid_auth_token",
