@@ -206,3 +206,50 @@ def test_normalize_responses_request_resolves_uploaded_image_ids(monkeypatch, tm
     image_item = content[0]
     assert image_item["type"] == "input_image"
     assert image_item["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_normalize_responses_request_remaps_developer_role_to_system() -> None:
+    """Responses API uses `role: developer` for what Chat Completions calls
+    `system`. The normalizer collapses that to system so downstream prompt
+    builders see one canonical role."""
+    payload = {
+        "model": "algae/deepseek/deepseek-chat",
+        "input": [{"type": "message", "role": "developer", "content": "rules"}],
+    }
+    normalized = normalize_responses_request(payload)
+    assert normalized.messages == [{"role": "system", "content": "rules"}]
+
+
+def test_normalize_responses_request_rejects_function_call_without_call_id() -> None:
+    import pytest
+
+    payload = {
+        "model": "algae/deepseek/deepseek-chat",
+        "input": [{"type": "function_call", "name": "x", "arguments": "{}"}],
+    }
+    with pytest.raises(RuntimeError, match="call_id is required"):
+        normalize_responses_request(payload)
+
+
+def test_normalize_responses_request_rejects_function_call_without_name() -> None:
+    import pytest
+
+    payload = {
+        "model": "algae/deepseek/deepseek-chat",
+        "input": [
+            {"type": "function_call", "call_id": "call_1", "arguments": "{}"},
+        ],
+    }
+    with pytest.raises(RuntimeError, match="name is required"):
+        normalize_responses_request(payload)
+
+
+def test_normalize_responses_request_rejects_function_call_output_without_call_id() -> None:
+    import pytest
+
+    payload = {
+        "model": "algae/deepseek/deepseek-chat",
+        "input": [{"type": "function_call_output", "output": "{}"}],
+    }
+    with pytest.raises(RuntimeError, match="call_id is required"):
+        normalize_responses_request(payload)
