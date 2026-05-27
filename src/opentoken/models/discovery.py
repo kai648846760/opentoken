@@ -546,8 +546,14 @@ def _discover_chatgpt_models(
     credentials: ProviderCredentialRecord,
     _state_dir: Path,
 ) -> list[tuple[str, str]]:
+    # chat.openai.com now 308-redirects to chatgpt.com; _http_get_json runs
+    # with follow_redirects=False (intentional, to avoid SSRF-bypass via
+    # follow), so we hit the canonical domain directly. Cookie-only auth is
+    # what /backend-api/models accepts here — passing the harvested
+    # access_token as a Bearer actually 401s ("Could not parse your
+    # authentication token"), so we let _http_get_json forward just the cookie.
     body = _http_get_json(
-        url="https://chat.openai.com/backend-api/models",
+        url="https://chatgpt.com/backend-api/models",
         credentials=credentials,
     )
     if isinstance(body, dict):
@@ -563,9 +569,9 @@ def _discover_chatgpt_models(
                     models.append((slug, title))
             if models:
                 return _dedupe_models(models)
-    # Fallback: parse the homepage HTML
+    # Fallback: parse the homepage HTML.
     try:
-        html = _fetch_text_page(url="https://chat.openai.com/", credentials=credentials)
+        html = _fetch_text_page(url="https://chatgpt.com/", credentials=credentials)
     except Exception:
         return []
     return _extract_chatgpt_models_from_html(html)
