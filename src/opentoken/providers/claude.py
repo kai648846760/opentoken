@@ -78,6 +78,7 @@ class ClaudeWebClient:
             f"{self._base_url}/organizations",
             headers=self.build_headers(),
         )
+        _raise_for_claude_auth(response.status_code)
         response.raise_for_status()
         payload = response.json()
         if isinstance(payload, list) and payload:
@@ -106,6 +107,7 @@ class ClaudeWebClient:
                 "uuid": str(uuid4()),
             },
         )
+        _raise_for_claude_auth(response.status_code)
         response.raise_for_status()
         payload = response.json()
         conversation_id = payload.get("uuid") or payload.get("id")
@@ -138,6 +140,7 @@ class ClaudeWebClient:
                 "tools": [],
             },
         )
+        _raise_for_claude_auth(response.status_code)
         response.raise_for_status()
         content = _parse_claude_sse_text(response.text)
         if not content:
@@ -170,6 +173,7 @@ class ClaudeWebClient:
                 "tools": [],
             },
         ) as response:
+            _raise_for_claude_auth(response.status_code)
             response.raise_for_status()
             for raw_line in response.iter_lines():
                 line = raw_line.strip()
@@ -267,6 +271,18 @@ class ClaudeWebAdapter(ProviderAdapter):
         return stream_method(
             message=build_role_prompt(request),
             model=model,
+        )
+
+
+def _raise_for_claude_auth(status_code: int) -> None:
+    """Convert claude.ai auth failures into a friendly RuntimeError that the
+    gateway's error classifier maps to 401 authentication_error. Without this,
+    a 401/403 would fall through to response.raise_for_status() -> httpx
+    HTTPStatusError -> the route's 502 api_error bucket, hiding the real fix
+    (re-login) behind an opaque upstream-error message."""
+    if status_code in (401, 403):
+        raise RuntimeError(
+            "Claude session expired or invalid. Run `opentoken login claude` to refresh."
         )
 
 
