@@ -474,3 +474,78 @@ def test_login_browser_rejects_provider_without_browser_support(monkeypatch, tmp
 
     assert result.exit_code != 0
     assert "Browser login is not implemented for manus" in result.stderr
+
+
+def test_login_browser_keeps_existing_credentials_when_new_harvest_fails_probe(monkeypatch, tmp_path) -> None:
+    """Dry-run protection: if a working credential already exists and the
+    freshly-harvested replacement doesn't pass the provider's authenticated
+    probe, opentoken keeps the previous credential and exits non-zero rather
+    than silently clobbering it with a broken one."""
+    from opentoken.models.provider_credentials import ProviderCredentialRecord
+    from opentoken.storage.provider_store import save_provider_credentials
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    providers_dir = tmp_path / ".opentoken" / "providers"
+    providers_dir.mkdir(parents=True, exist_ok=True)
+    save_provider_credentials(
+        providers_dir,
+        ProviderCredentialRecord(
+            provider="deepseek",
+            kind="browser_session",
+            cookie="known-good-cookie",
+            headers={"authorization": "Bearer known-good-token"},
+            user_agent="known-good-ua",
+            metadata={},
+            status="valid",
+        ),
+    )
+
+    def fake_capture(provider: str, *, state_dir):
+        return {
+            "cookie": "harvested-bogus-cookie",
+            "bearer": "bogus-token",
+            "user_agent": "harvested-ua",
+        }
+
+    monkeypatch.setattr(cli_app_module, "capture_provider_browser_credentials", fake_capture)
+    # Force the probe to reject — simulates a botched harvest.
+    monkeypatch.setattr(cli_app_module, "probe_credentials", lambda record: False)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["login", "deepseek", "--browser"])
+
+    assert result.exit_code != 0
+    assert "did not pass the authenticated probe" in result.stderr
+    # Previous credentials are preserved untouched.
+    loaded = load_provider_credentials(providers_dir, "deepseek")
+    assert loaded is not None
+    assert loaded.cookie == "known-good-cookie"
+    assert loaded.headers["authorization"] == "Bearer known-good-token"
+
+
+def test_login_browser_first_time_skips_probe(monkeypatch, tmp_path) -> None:
+    """First-time logins (no prior credential to protect) skip the probe so a
+    transient network blip doesn't block onboarding."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def fake_capture(provider: str, *, state_dir):
+        return {"cookie": "fresh", "bearer": "fresh-bearer", "user_agent": "ua"}
+
+    monkeypatch.setattr(cli_app_module, "capture_provider_browser_credentials", fake_capture)
+    # Probe would fail if called — assert it's not called.
+    called = {"count": 0}
+
+    def explode(record):
+        called["count"] += 1
+        return False
+
+    monkeypatch.setattr(cli_app_module, "probe_credentials", explode)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["login", "deepseek", "--browser"])
+
+    assert result.exit_code == 0
+    assert called["count"] == 0
+    loaded = load_provider_credentials(tmp_path / ".opentoken" / "providers", "deepseek")
+    assert loaded is not None
+    assert loaded.cookie == "fresh"

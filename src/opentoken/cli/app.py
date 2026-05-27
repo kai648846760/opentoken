@@ -26,8 +26,10 @@ from opentoken.storage.bootstrap import initialize_state_dir
 from opentoken.storage.provider_store import (
     delete_provider_credentials,
     list_provider_credentials,
+    load_provider_credentials,
     save_provider_credentials,
 )
+from opentoken.verification.credentials_probe import probe_credentials
 from opentoken.verification.service import (
     render_verification_report,
     run_verification_suite,
@@ -100,7 +102,26 @@ def login(
             metadata=metadata,
             status='valid',
         )
-        save_provider_credentials(resolve_providers_dir(), record)
+        providers_dir = resolve_providers_dir()
+        # Dry-run guard: if we already have a working credential for this
+        # provider, refuse to overwrite it with a freshly-harvested one that
+        # doesn't authenticate against the provider's known-good probe URL.
+        # A botched harvest (cookies grabbed before login completed, page
+        # navigated away mid-flow) could otherwise replace good cookies with
+        # broken ones. First-time logins skip the probe so a transient network
+        # blip doesn't block the user.
+        if load_provider_credentials(providers_dir, provider_key) is not None:
+            saved_path = save_provider_credentials(providers_dir, record, validator=probe_credentials)
+            if saved_path is None:
+                typer.echo(
+                    f'Captured credentials for {provider_key} did not pass the '
+                    'authenticated probe; keeping the previous working credentials. '
+                    'Re-run `opentoken login` once the upstream login finishes.',
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+        else:
+            save_provider_credentials(providers_dir, record)
         typer.echo(f'Captured browser credentials for {provider_key}')
         return
 
