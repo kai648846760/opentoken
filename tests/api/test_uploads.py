@@ -60,3 +60,39 @@ def test_uploads_create_add_part_complete_and_cancel(monkeypatch, tmp_path) -> N
     cancel_response = client.post(f"/v1/uploads/{cancel_upload_id}/cancel")
     assert cancel_response.status_code == 200
     assert cancel_response.json()["status"] == "cancelled"
+
+
+def test_uploads_create_rejects_absurd_declared_size(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(uploads_route_module, "resolve_state_dir", lambda: tmp_path)
+    client = TestClient(create_app())
+    # 1 TB declared total exceeds the 8 GiB ceiling -> 422 (pydantic validation).
+    response = client.post(
+        "/v1/uploads",
+        json={
+            "filename": "huge.bin",
+            "bytes": 1024 * 1024 * 1024 * 1024,
+            "mime_type": "application/octet-stream",
+            "purpose": "assistants",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_uploads_add_part_rejects_oversize_part(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(uploads_route_module, "resolve_state_dir", lambda: tmp_path)
+    # Shrink the cap so we don't have to actually send 100 MiB in the test.
+    monkeypatch.setattr(uploads_route_module, "_MAX_PART_BYTES", 1024)
+    client = TestClient(create_app())
+
+    create_response = client.post(
+        "/v1/uploads",
+        json={"filename": "f.bin", "bytes": 5000, "mime_type": "application/octet-stream", "purpose": "assistants"},
+    )
+    upload_id = create_response.json()["id"]
+
+    response = client.post(
+        f"/v1/uploads/{upload_id}/parts",
+        files={"data": ("part", b"x" * 4096, "application/octet-stream")},
+    )
+    assert response.status_code == 413
+    assert "maximum part size" in response.json()["error"]["message"]
