@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sys
 import types
 
@@ -81,44 +80,62 @@ def test_unified_proxy_calls_litellm_with_stripped_prefix(fake_litellm):
     assert call["messages"] == [{"role": "user", "content": "hi"}]
 
 
-def test_unified_proxy_injects_env_for_only_known_backends(monkeypatch, fake_litellm):
+def test_unified_proxy_passes_backend_specific_api_key(fake_litellm):
+    """The backend prefix in the model id picks the matching api_key_<backend>
+    entry from credentials metadata and passes it as litellm's per-call `api_key=`
+    kwarg. The previous design mutated os.environ under a global lock, which
+    serialised every unified-proxy request process-wide for the duration of the
+    upstream completion."""
     from opentoken.providers.unified_proxy import UnifiedProxyAdapter
 
-    saved_openrouter = os.environ.pop("OPENROUTER_API_KEY", None)
-    saved_anthropic = os.environ.pop("ANTHROPIC_API_KEY", None)
+    UnifiedProxyAdapter().chat(_request("unified/openrouter/anthropic/claude-3.5-sonnet"), _credentials())
+    assert fake_litellm._seen[-1]["api_key"] == "sk-or-test"
 
-    captured: dict[str, str | None] = {}
+    UnifiedProxyAdapter().chat(_request("unified/anthropic/claude-3-haiku"), _credentials())
+    assert fake_litellm._seen[-1]["api_key"] == "sk-ant-test"
 
-    real_completion = fake_litellm.completion
 
-    def spying_completion(**kwargs):
-        captured["openrouter"] = os.environ.get("OPENROUTER_API_KEY")
-        captured["anthropic"] = os.environ.get("ANTHROPIC_API_KEY")
-        return real_completion(**kwargs)
+def test_unified_proxy_falls_back_to_generic_api_key(fake_litellm):
+    """If a backend doesn't have a dedicated api_key_<backend> entry, fall back
+    to a generic api_key (covers single-backend setups that don't need the
+    namespaced form)."""
+    from opentoken.providers.unified_proxy import UnifiedProxyAdapter
 
-    fake_litellm.completion = spying_completion
+    creds = ProviderCredentialRecord(
+        provider="unified",
+        kind="api_key",
+        cookie="",
+        headers={},
+        user_agent="",
+        metadata={"api_key": "generic-key"},
+        status="valid",
+    )
+    UnifiedProxyAdapter().chat(_request("unified/groq/llama-3"), creds)
+    assert fake_litellm._seen[-1]["api_key"] == "generic-key"
 
-    adapter = UnifiedProxyAdapter()
-    adapter.chat(_request("unified/openrouter/foo"), _credentials())
 
-    # During the call the env vars were set …
-    assert captured["openrouter"] == "sk-or-test"
-    assert captured["anthropic"] == "sk-ant-test"
-    # … and after the call they're restored / removed.
-    assert os.environ.get("OPENROUTER_API_KEY") is None
-    assert os.environ.get("ANTHROPIC_API_KEY") is None
+def test_unified_proxy_omits_api_key_when_credentials_have_none(fake_litellm):
+    """No credentials configured for the requested backend → don't pass api_key,
+    let litellm resolve via its own env vars (covers users who set env directly)."""
+    from opentoken.providers.unified_proxy import UnifiedProxyAdapter
 
-    if saved_openrouter is not None:
-        os.environ["OPENROUTER_API_KEY"] = saved_openrouter
-    if saved_anthropic is not None:
-        os.environ["ANTHROPIC_API_KEY"] = saved_anthropic
+    creds = ProviderCredentialRecord(
+        provider="unified",
+        kind="api_key",
+        cookie="",
+        headers={},
+        user_agent="",
+        metadata={"api_key_openrouter": "sk-or-test"},  # No 'groq' entry.
+        status="valid",
+    )
+    UnifiedProxyAdapter().chat(_request("unified/groq/llama-3"), creds)
+    assert "api_key" not in fake_litellm._seen[-1]
 
 
 def test_unified_proxy_raises_when_litellm_missing(monkeypatch):
     import opentoken.providers.unified_proxy as up
 
     monkeypatch.setitem(sys.modules, "litellm", None)
-    # Reset cached flag and make the import attempt fail.
     up._LITELLM_AVAILABLE = None
     real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
 

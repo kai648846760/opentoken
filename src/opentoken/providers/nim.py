@@ -119,9 +119,17 @@ class NimChatAdapter(ProviderAdapter):
         return key
 
     def _client_key(self, credentials: ProviderCredentialRecord) -> str:
-        # Don't include the API key in the cache key — credentials may rotate
-        # without restarting; key on provider + a stable fingerprint instead.
-        return f"{credentials.provider}:{id(credentials)}"
+        # Key on the API key, not id(credentials): the router loads a fresh
+        # ProviderCredentialRecord from disk on every request, so id() changes
+        # each call and the cache would never hit — defeating httpx connection
+        # pooling and forcing a new TCP+TLS handshake to NIM per request. The
+        # api key is stable per account and naturally rotates the client when
+        # the user re-logs-in with a new key.
+        try:
+            key = self._api_key(credentials)
+        except RuntimeError:
+            key = ""
+        return f"{credentials.provider}:{key}"
 
     def _get_client(self, credentials: ProviderCredentialRecord) -> httpx.Client:
         cached = self._client_cache.get(self._client_key(credentials))

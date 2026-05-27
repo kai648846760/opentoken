@@ -121,6 +121,36 @@ def _ping_chat_completion_stream(client: httpx.Client, model: str) -> tuple[bool
     return True, text[:80]
 
 
+def _ping_responses(client: httpx.Client, model: str) -> tuple[bool, str]:
+    try:
+        response = client.post(
+            "/v1/responses",
+            json={
+                "model": model,
+                "input": SMOKE_PROMPT,
+                "stream": False,
+            },
+            timeout=120.0,
+        )
+    except Exception as exc:
+        return False, f"connection: {exc}"
+    if response.status_code != 200:
+        return False, f"http {response.status_code}: {response.text[:120]}"
+    payload = response.json()
+    output = payload.get("output") or []
+    texts: list[str] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        for piece in item.get("content") or []:
+            if isinstance(piece, dict) and isinstance(piece.get("text"), str):
+                texts.append(piece["text"])
+    joined = "".join(texts).strip()
+    if not joined:
+        return False, "empty responses output"
+    return True, joined[:80]
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider", action="append", help="Provider key (repeatable)")
@@ -177,7 +207,11 @@ def main(argv: list[str] | None = None) -> int:
                 stream_ok, stream_detail = _ping_chat_completion_stream(client, model)
                 stream_latency = (time.perf_counter() - started) * 1000
 
-            overall = non_stream_ok and stream_ok
+            started = time.perf_counter()
+            responses_ok, responses_detail = _ping_responses(client, model)
+            responses_latency = (time.perf_counter() - started) * 1000
+
+            overall = non_stream_ok and stream_ok and responses_ok
             results.append({
                 "provider": provider,
                 "model": model,
@@ -191,13 +225,20 @@ def main(argv: list[str] | None = None) -> int:
                     "detail": stream_detail,
                     "latency_ms": round(stream_latency, 1),
                 },
+                "responses": {
+                    "ok": responses_ok,
+                    "detail": responses_detail,
+                    "latency_ms": round(responses_latency, 1),
+                },
                 "status": "pass" if overall else "fail",
             })
             print(
-                f"[{provider}] non-stream={'pass' if non_stream_ok else 'FAIL'} "
-                f"({non_stream_latency:.0f}ms) {non_stream_detail!r:.80s} | "
-                f"stream={'pass' if stream_ok else 'FAIL'} "
-                f"({stream_latency:.0f}ms) {stream_detail!r:.80s}",
+                f"[{provider}] chat-nonstream={'pass' if non_stream_ok else 'FAIL'} "
+                f"({non_stream_latency:.0f}ms) | "
+                f"chat-stream={'pass' if stream_ok else 'FAIL'} "
+                f"({stream_latency:.0f}ms) | "
+                f"responses={'pass' if responses_ok else 'FAIL'} "
+                f"({responses_latency:.0f}ms)",
                 file=sys.stderr,
             )
 

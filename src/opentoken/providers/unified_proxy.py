@@ -33,10 +33,7 @@ upstream model id verbatim.
 """
 from __future__ import annotations
 
-import os
-import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
 
 from opentoken.gateway.normalized import NormalizedChatRequest
 from opentoken.models.provider_credentials import ProviderCredentialRecord
@@ -70,66 +67,29 @@ def _import_litellm():
     return litellm
 
 
-_KEY_TO_ENV = {
-    "openrouter": "OPENROUTER_API_KEY",
-    "groq": "GROQ_API_KEY",
-    "together": "TOGETHER_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "perplexity": "PERPLEXITY_API_KEY",
-    "cohere": "COHERE_API_KEY",
-    "mistral": "MISTRAL_API_KEY",
-    "bedrock": "AWS_ACCESS_KEY_ID",
-    "fireworks": "FIREWORKS_API_KEY",
-    "deepinfra": "DEEPINFRA_API_KEY",
-    "xai": "XAI_API_KEY",
-    "azure": "AZURE_API_KEY",
-}
+def _resolve_api_key(model: str, credentials: ProviderCredentialRecord) -> str | None:
+    """Pick the credential key matching the model's backend prefix.
 
-
-_ENV_LOCK = threading.Lock()
-
-
-@contextmanager
-def _injected_env(envs: dict[str, str]):
-    """Inject env vars for litellm's duration, then restore.
-
-    LiteLLM reads provider keys from process env. We don't want a long-lived
-    process to keep them set (it pollutes other libraries and is harder to
-    rotate). The lock prevents two concurrent unified-proxy calls from
-    interfering with each other's env state.
+    A single chat request targets exactly one LiteLLM backend (identified by the
+    first segment of the model id, e.g. `openrouter/...` or `groq/...`). We pull
+    only that backend's key from the credentials and pass it as litellm's
+    per-call `api_key=` kwarg. This replaces the previous approach of mutating
+    `os.environ` under a global lock, which serialised every unified-proxy call
+    process-wide for the duration of the upstream completion (catastrophic for
+    long-running streams).
     """
-    if not envs:
-        yield
-        return
-    with _ENV_LOCK:
-        saved: dict[str, str | None] = {key: os.environ.get(key) for key in envs}
-        os.environ.update(envs)
-        try:
-            yield
-        finally:
-            for key, original in saved.items():
-                if original is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = original
-
-
-def _resolve_envs(credentials: ProviderCredentialRecord) -> dict[str, str]:
-    out: dict[str, str] = {}
-    if not credentials.metadata:
-        return out
-    for meta_key, value in credentials.metadata.items():
-        if not isinstance(meta_key, str) or not meta_key.startswith("api_key_"):
-            continue
-        backend = meta_key[len("api_key_"):]
-        env_name = _KEY_TO_ENV.get(backend)
-        if not env_name:
-            continue
-        text = str(value or "").strip()
-        if text:
-            out[env_name] = text
-    return out
+    if not credentials.metadata or not model:
+        return None
+    backend = model.split("/", 1)[0].strip().lower()
+    if not backend:
+        return None
+    # Accept either api_key_<backend> (preferred, multi-backend) or a generic
+    # api_key fallback so single-backend setups don't need namespacing.
+    for candidate_key in (f"api_key_{backend}", "api_key"):
+        raw = credentials.metadata.get(candidate_key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return None
 
 
 def _model_id_from_request(request: NormalizedChatRequest) -> str:
@@ -173,19 +133,21 @@ class UnifiedProxyAdapter(ProviderAdapter):
                 "Run `opentoken login unified --header api_key_openrouter=sk-or-...` (or similar)."
             )
         litellm = _import_litellm()
-        envs = _resolve_envs(credentials)
         model = _model_id_from_request(request)
         if not model:
             raise RuntimeError("unified proxy: missing backend/model id in request.")
-        with _injected_env(envs):
-            response = litellm.completion(
-                model=model,
-                messages=_messages_from_request(request),
-                stream=False,
-                temperature=request.temperature,
-                tools=request.tools,
-                tool_choice=request.tool_choice,
-            )
+        api_key = _resolve_api_key(model, credentials)
+        kwargs: dict[str, object] = {
+            "model": model,
+            "messages": _messages_from_request(request),
+            "stream": False,
+            "temperature": request.temperature,
+            "tools": request.tools,
+            "tool_choice": request.tool_choice,
+        }
+        if api_key:
+            kwargs["api_key"] = api_key
+        response = litellm.completion(**kwargs)
         return _convert_litellm_completion(request.model, response)
 
     def stream_chat(
@@ -199,10 +161,10 @@ class UnifiedProxyAdapter(ProviderAdapter):
                 "Run `opentoken login unified` first."
             )
         litellm = _import_litellm()
-        envs = _resolve_envs(credentials)
         model = _model_id_from_request(request)
         if not model:
             raise RuntimeError("unified proxy: missing backend/model id in request.")
+        api_key = _resolve_api_key(model, credentials)
         return _stream_unified(
             litellm=litellm,
             model=model,
@@ -210,7 +172,7 @@ class UnifiedProxyAdapter(ProviderAdapter):
             temperature=request.temperature,
             tools=request.tools,
             tool_choice=request.tool_choice,
-            envs=envs,
+            api_key=api_key,
         )
 
 
@@ -249,21 +211,23 @@ def _stream_unified(
     temperature: float | None,
     tools: list[dict[str, object]] | None,
     tool_choice: object,
-    envs: dict[str, str],
+    api_key: str | None,
 ) -> Iterator[str]:
-    with _injected_env(envs):
-        stream = litellm.completion(
-            model=model,
-            messages=messages,
-            stream=True,
-            temperature=temperature,
-            tools=tools,
-            tool_choice=tool_choice,
-        )
-        for chunk in stream:
-            delta = _extract_delta(chunk)
-            if delta:
-                yield delta
+    kwargs: dict[str, object] = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "temperature": temperature,
+        "tools": tools,
+        "tool_choice": tool_choice,
+    }
+    if api_key:
+        kwargs["api_key"] = api_key
+    stream = litellm.completion(**kwargs)
+    for chunk in stream:
+        delta = _extract_delta(chunk)
+        if delta:
+            yield delta
 
 
 def _extract_delta(chunk: object) -> str:
