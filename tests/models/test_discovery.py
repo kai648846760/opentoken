@@ -1,4 +1,5 @@
 from opentoken.models.discovery import (
+    _discover_qwen_cn_models,
     _extract_doubao_models_from_html,
     _extract_glm_cn_models_from_html,
     _extract_qwen_cn_models_from_dialog_text,
@@ -6,6 +7,42 @@ from opentoken.models.discovery import (
     load_model_catalog,
 )
 from opentoken.models.provider_credentials import ProviderCredentialRecord
+
+
+def test_discover_qwen_cn_routes_browser_work_through_persistent_worker(monkeypatch) -> None:
+    """qwen-cn discovery must run its Playwright work on the persistent per-
+    provider worker thread (via _run_browser_completion), not directly on the
+    discovery executor thread — otherwise repeated /v1/models calls close the
+    browser session cross-thread (Playwright thread-affinity violation)."""
+    import json as _json
+
+    captured: dict[str, object] = {}
+
+    def fake_run_browser_completion(*, provider_name, invoke, **kwargs):
+        captured["provider_name"] = provider_name
+        # Simulate the worker thread invoking the closure and carrying back a str.
+        return invoke()
+
+    # The discoverer's _with_page is what would touch Playwright; stub it so the
+    # closure returns a known model list without launching a browser.
+    monkeypatch.setattr(
+        "opentoken.providers.browser._run_browser_completion",
+        fake_run_browser_completion,
+    )
+    monkeypatch.setattr(
+        "opentoken.providers.camoufox_clients.CamoufoxProviderClient._with_page",
+        lambda self, *, start_url, cookie_domains, action: [("Qwen3-Max", "Qwen3 Max")],
+    )
+
+    creds = ProviderCredentialRecord(
+        provider="qwen-cn", kind="browser_session", cookie="x", headers={},
+        user_agent="ua", metadata={}, status="valid",
+    )
+    from pathlib import Path
+
+    result = _discover_qwen_cn_models(creds, Path("/tmp"))
+    assert captured["provider_name"] == "qwen-cn"
+    assert result == [("Qwen3-Max", "Qwen3 Max")]
 
 
 def test_extract_qwen_intl_models_from_html_returns_model_entries() -> None:

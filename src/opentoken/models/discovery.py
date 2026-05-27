@@ -284,6 +284,16 @@ def _discover_qwen_cn_models(
     credentials: ProviderCredentialRecord,
     state_dir: Path,
 ) -> list[tuple[str, str]]:
+    # Discovery is driven by load_model_catalog's ThreadPoolExecutor; each
+    # /v1/models cold call spawns transient worker threads. If those workers
+    # touched Playwright directly, every other call would find an existing
+    # qwen-cn _PROVIDER_GLOBAL_SESSIONS entry owned by a now-dead thread and
+    # would close its Playwright context FROM A DIFFERENT THREAD, violating
+    # the sync-API's thread-affinity (greenlet "cannot switch threads"). Route
+    # the browser work through the persistent per-provider worker thread via
+    # _run_browser_completion so the session always has one stable owner.
+    from opentoken.providers.browser import _run_browser_completion
+
     client = CamoufoxProviderClient("qwen-cn", credentials)
     client._state_dir = state_dir
 
@@ -318,13 +328,28 @@ def _discover_qwen_cn_models(
         )
         return _extract_qwen_cn_models_from_dialog_text(str(dialog_text))
 
-    return list(
-        client._with_page(
-            start_url="https://www.qianwen.com/",
-            cookie_domains=(".qianwen.com",),
-            action=action,
+    def _invoke() -> str:
+        models = list(
+            client._with_page(
+                start_url="https://www.qianwen.com/",
+                cookie_domains=(".qianwen.com",),
+                action=action,
+            )
         )
-    )
+        # _run_browser_completion carries a str across the worker boundary;
+        # serialize the (id, name) tuples and rebuild them on the far side.
+        return json.dumps(models)
+
+    raw = _run_browser_completion(provider_name="qwen-cn", invoke=_invoke)
+    try:
+        decoded = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return [
+        (str(item[0]), str(item[1]))
+        for item in decoded
+        if isinstance(item, (list, tuple)) and len(item) == 2
+    ]
 
 
 def _discover_doubao_models(
