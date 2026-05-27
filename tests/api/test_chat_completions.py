@@ -779,3 +779,33 @@ def test_chat_completions_maps_upstream_provider_failure_to_502(monkeypatch) -> 
     # error — 502, not 400.
     assert response.status_code == 502
     assert response.json()["error"]["type"] == "api_error"
+
+
+def test_request_body_size_cap_rejects_oversized_requests(monkeypatch) -> None:
+    """The body-size middleware rejects requests whose Content-Length exceeds
+    the 25 MiB cap, before they ever reach the route handler. Protects against
+    malicious clients trying to OOM the gateway with a giant JSON payload."""
+    monkeypatch.setattr(chat_route_module, "get_default_router", lambda: FakeRouter())
+    client = TestClient(create_app())
+
+    # Manually-crafted oversize Content-Length: send 1 KB of body but claim 30 MiB.
+    huge_length = str(30 * 1024 * 1024)
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"content-length": huge_length, "content-type": "application/json"},
+        content=b'{"model":"algae/deepseek/deepseek-chat","messages":[]}',
+    )
+
+    assert response.status_code == 413
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert "exceeds the maximum size" in response.json()["error"]["message"]
+
+
+def test_request_body_size_cap_allows_normal_requests(monkeypatch) -> None:
+    monkeypatch.setattr(chat_route_module, "get_default_router", lambda: FakeRouter())
+    client = TestClient(create_app())
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "algae/deepseek/deepseek-chat", "messages": [{"role": "user", "content": "hello"}]},
+    )
+    assert response.status_code == 200

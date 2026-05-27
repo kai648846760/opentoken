@@ -20,9 +20,43 @@ from opentoken.config.gateway_config import load_gateway_config
 logger = logging.getLogger("opentoken.api")
 
 
+# Generous upper bound on JSON-ish request bodies so a single malicious client
+# can't OOM the gateway with a giant body. /v1/files already enforces its own
+# 100 MiB streaming cap for multipart uploads — this guard covers chat /
+# responses / embeddings JSON. A 25 MiB body is well above any realistic prompt
+# (~6M chars of English) but well below "let's chew the worker's heap" territory.
+_MAX_JSON_BODY_BYTES = 25 * 1024 * 1024
+_UNBOUNDED_BODY_PATHS = ("/v1/files", "/v1/uploads")
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="OpenToken")
     _bootstrap_gateway_config()
+
+    @app.middleware("http")
+    async def enforce_request_body_size(request: Request, call_next):
+        # Only inspect routes that don't already do their own size accounting.
+        if not any(request.url.path.startswith(prefix) for prefix in _UNBOUNDED_BODY_PATHS):
+            raw_length = request.headers.get("content-length")
+            if raw_length is not None:
+                try:
+                    declared = int(raw_length)
+                except ValueError:
+                    declared = -1
+                if declared > _MAX_JSON_BODY_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={
+                            "error": {
+                                "message": (
+                                    f"Request body exceeds the maximum size of "
+                                    f"{_MAX_JSON_BODY_BYTES // (1024 * 1024)} MiB."
+                                ),
+                                "type": "invalid_request_error",
+                            }
+                        },
+                    )
+        return await call_next(request)
 
     @app.middleware("http")
     async def assign_request_id(request: Request, call_next):
