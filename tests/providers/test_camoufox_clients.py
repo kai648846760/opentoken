@@ -5137,3 +5137,23 @@ def test_with_page_does_not_close_browser_session_after_success(monkeypatch, tmp
 
     assert result == "ok"
     assert closed == []  # session kept alive for reuse
+
+
+def test_select_all_chord_is_platform_appropriate(monkeypatch):
+    """The composer-clearing select-all chord must be Ctrl+A off macOS;
+    a hardcoded Meta+A silently no-ops on Linux/Windows, leaving stale draft
+    text that gets concatenated in front of the new message. The module
+    computes the chord from sys.platform at import."""
+    import importlib
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "linux")
+    reloaded = importlib.reload(camoufox_module)
+    try:
+        assert reloaded._SELECT_ALL_CHORD == "Control+A"
+        monkeypatch.setattr(_sys, "platform", "darwin")
+        reloaded = importlib.reload(camoufox_module)
+        assert reloaded._SELECT_ALL_CHORD == "Meta+A"
+    finally:
+        # Restore a clean module state for any later tests in the session.
+        importlib.reload(camoufox_module)

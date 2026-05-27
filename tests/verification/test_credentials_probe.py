@@ -48,6 +48,32 @@ def test_claude_probe_fails_on_401() -> None:
     assert ok is False
 
 
+def test_browser_session_without_cookie_fails_without_probing() -> None:
+    """An empty-cookie browser_session has no auth state — it must fail closed,
+    NOT send an unauthenticated request that some providers answer 200 to
+    (which would falsely mark a broken credential as ok)."""
+    probed = {"called": False}
+
+    def factory():
+        probed["called"] = True
+        return httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json=[{"uuid": "org"}])),
+            trust_env=False,
+        )
+
+    record = ProviderCredentialRecord(
+        provider="claude",
+        kind="browser_session",
+        cookie="",
+        headers={},
+        user_agent="ua",
+        metadata={},
+        status="valid",
+    )
+    assert probe_credentials(record, client_factory=factory) is False
+    assert probed["called"] is False  # never even attempted the request
+
+
 def test_claude_probe_fails_on_network_error() -> None:
     def boom() -> httpx.Client:
         raise httpx.ConnectError("no network")

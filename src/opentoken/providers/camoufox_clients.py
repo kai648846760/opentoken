@@ -8,6 +8,7 @@ import json
 import queue
 import re
 import shutil
+import sys
 import time
 import threading
 from contextlib import contextmanager
@@ -41,6 +42,14 @@ from opentoken.providers.qwen import (
 )
 from opentoken.storage.provider_store import save_provider_credentials
 from opentoken.storage.provider_sessions import load_provider_session, save_provider_session
+
+
+# Camoufox runs as a local browser, so the host OS is the browser's OS. The
+# select-all chord is Cmd+A on macOS and Ctrl+A everywhere else. The composer-
+# clearing sequence (select-all then Backspace) silently no-ops on Linux/Windows
+# with a hardcoded "Meta+A" — leaving stale draft text that gets concatenated
+# in front of the new message.
+_SELECT_ALL_CHORD = "Meta+A" if sys.platform.startswith("darwin") else "Control+A"
 
 
 _GLM_SIGN_SECRET = "8a1317a7468aa3ad86e997d08f3f31cb"
@@ -2365,7 +2374,7 @@ def _dom_send_and_wait_doubao(page, session: _ProviderBrowserSession, client: Ca
         prefer_fill = "\n" in message or "\r" in message
         if composer_focused and not prefer_fill:
             try:
-                page.keyboard.press("Meta+A")
+                page.keyboard.press(_SELECT_ALL_CHORD)
                 page.keyboard.press("Backspace")
                 page.wait_for_timeout(150)
                 page.keyboard.type(message, delay=55)
@@ -2934,7 +2943,7 @@ def _stream_doubao_dom_completion(
     prefer_fill = "\n" in message or "\r" in message
     if composer_focused and not prefer_fill:
         try:
-            page.keyboard.press("Meta+A")
+            page.keyboard.press(_SELECT_ALL_CHORD)
             page.keyboard.press("Backspace")
             page.wait_for_timeout(150)
             page.keyboard.type(message, delay=55)
@@ -3533,7 +3542,7 @@ def _dom_send_and_wait_qwen_cn(page, message: str) -> str:
     composer = page.locator('[contenteditable="true"][role="textbox"]').first
     composer.wait_for(timeout=120000)
     composer.click(timeout=30000)
-    page.keyboard.press("Meta+A")
+    page.keyboard.press(_SELECT_ALL_CHORD)
     page.keyboard.press("Backspace")
     page.keyboard.type(message, delay=20)
     page.keyboard.press("Enter")
@@ -3826,7 +3835,7 @@ def _send_qwen_intl_dom_message(page, *, message: str) -> None:
     filled = _set_visible_textarea_value(page, ["textarea.message-input-textarea", "textarea"], message)
     if not filled:
         try:
-            page.keyboard.press("Meta+A")
+            page.keyboard.press(_SELECT_ALL_CHORD)
             page.keyboard.press("Backspace")
         except Exception:
             pass
@@ -4407,19 +4416,25 @@ def _dom_send_and_wait_gemini(page, message: str) -> str:
             """
             () => {
               const clean = (text) => (text || "").replace(/[\\u200B-\\u200D\\uFEFF]/g, "").trim();
+              // The first selector is Gemini's own semantic marker for a model
+              // turn — its text IS the reply, so accept any non-empty value
+              // (a short answer like "Yes." was being dropped by a blanket
+              // length >= 40 gate, causing a 120s timeout + capture failure).
+              // The looser fallback selectors can match UI chrome, so keep a
+              // length floor there to avoid capturing button/placeholder text.
               const selectors = [
-                '[data-message-author="model"]',
-                '[class*="assistant-message"]',
-                '[class*="response-content"]',
-                'article',
-                '[class*="markdown"]',
+                ['[data-message-author="model"]', 1],
+                ['[class*="assistant-message"]', 40],
+                ['[class*="response-content"]', 40],
+                ['article', 40],
+                ['[class*="markdown"]', 40],
               ];
               let text = "";
-              for (const selector of selectors) {
+              for (const [selector, minLen] of selectors) {
                 const nodes = document.querySelectorAll(selector);
                 for (let idx = nodes.length - 1; idx >= 0; idx -= 1) {
                   const value = clean(nodes[idx].textContent);
-                  if (value.length >= 40) {
+                  if (value.length >= minLen) {
                     text = value;
                     break;
                   }
@@ -4559,7 +4574,7 @@ def _dom_send_and_wait_glm_cn(
         typed = False
         prefer_fill = "\n" in message or "\r" in message
         if not prefer_fill:
-            page.keyboard.press("Meta+A")
+            page.keyboard.press(_SELECT_ALL_CHORD)
             page.keyboard.press("Backspace")
             page.keyboard.type(message, delay=35)
             typed = True
@@ -4700,7 +4715,7 @@ def _send_glm_intl_dom_message(page, *, message: str) -> None:
         try:
             composer.fill(message)
         except Exception:
-            page.keyboard.press("Meta+A")
+            page.keyboard.press(_SELECT_ALL_CHORD)
             page.keyboard.press("Backspace")
             page.keyboard.type(message, delay=12)
     page.wait_for_timeout(200)

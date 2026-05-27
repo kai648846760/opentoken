@@ -60,6 +60,12 @@ def probe_credentials(
         # Some providers (e.g. api-key providers like nim/manus/unified) don't
         # have a cheap GET we can hit without spending a quota; trust the user.
         return True
+    # A browser_session record without a cookie has no auth state — probing it
+    # would send an unauthenticated request to the target, which can return 200
+    # (some providers serve stub responses to anonymous GETs), falsely marking
+    # an empty credential as "ok" and overwriting a previously-working one.
+    if record.kind == "browser_session" and not (record.cookie or "").strip():
+        return False
     url, ok_status = target
 
     if client_factory is None:
