@@ -33,7 +33,10 @@ class ClaudeWebClient:
     ) -> None:
         self._credentials = credentials
         self._base_url = base_url.rstrip("/")
-        self._client = client or httpx.Client(timeout=60.0, trust_env=False)
+        # 120s for Claude's extended-thinking models (Opus 4.x, Sonnet 4.5).
+        # 60s was too tight for hard reasoning prompts and surfaced as opaque
+        # httpx ReadTimeout -> 502 once the gateway's error classifier hit it.
+        self._client = client or httpx.Client(timeout=120.0, trust_env=False)
         self._organization_id = self._resolve_organization_id()
         self._device_id = self._resolve_device_id()
 
