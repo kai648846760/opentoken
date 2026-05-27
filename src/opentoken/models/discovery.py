@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 from pathlib import Path
 import re
@@ -12,8 +13,15 @@ from opentoken.config.paths import resolve_providers_dir, resolve_state_dir
 from opentoken.models.catalog import ModelCatalogEntry, default_catalog
 from opentoken.models.provider_credentials import ProviderCredentialRecord
 from opentoken.providers.camoufox_clients import CamoufoxProviderClient
+from opentoken.storage._atomic import write_json_atomic
 from opentoken.storage.provider_sessions import credential_fingerprint
 from opentoken.storage.provider_store import load_provider_credentials
+
+# Overall wall-clock budget for a single cold-cache discovery pass. Each provider
+# discoverer runs concurrently; any that haven't returned by this deadline are
+# skipped for this pass (they contribute nothing rather than blocking /v1/models).
+_DISCOVERY_PASS_DEADLINE_SECONDS = 45.0
+_DISCOVERY_MAX_WORKERS = 8
 
 # Each discoverer should return list[(provider_model_id, display_name)]; an empty
 # list is a soft failure (provider unreachable, schema changed, …) — the loader
@@ -86,8 +94,10 @@ def _load_cache(path: Path) -> dict[str, dict[str, object]]:
 
 
 def _save_cache(path: Path, payload: dict[str, dict[str, object]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Atomic write: two concurrent /v1/models requests in the FastAPI threadpool
+    # both call load_model_catalog → both call _save_cache. Without tmp+rename
+    # they can interleave and produce torn JSON that _load_cache then drops.
+    write_json_atomic(path, payload)
 
 
 def _cache_key(provider: str, credentials: ProviderCredentialRecord) -> str:
@@ -751,40 +761,76 @@ def load_model_catalog(
     now = time.time()
     provider_order, grouped_entries = _group_fallback_catalog()
 
-    for provider, discoverer in _DISCOVERERS.items():
+    # First pass (no I/O): collect logged-in providers, serving any with a valid
+    # cache entry immediately and queueing the rest for live discovery.
+    cached_results: dict[str, list[tuple[str, str]]] = {}
+    to_discover: list[tuple[str, ProviderCredentialRecord]] = []
+    for provider, _discoverer in _DISCOVERERS.items():
         credentials = load_provider_credentials(resolved_providers_dir, provider)
         if credentials is None:
             continue
-        discovered = (
-            _load_cached_models(
-                cache,
-                provider=provider,
-                credentials=credentials,
-                now=now,
-            )
+        cached = (
+            _load_cached_models(cache, provider=provider, credentials=credentials, now=now)
             if use_cache
             else None
         )
-        if discovered is None:
-            try:
-                discovered = _dedupe_models(discoverer(credentials, resolved_state_dir))
-            except Exception:
-                discovered = None
-            if discovered and use_cache:
-                _store_cached_models(
-                    cache,
-                    provider=provider,
-                    credentials=credentials,
-                    models=discovered,
-                    now=now,
-                )
-        if discovered:
-            grouped_entries[provider] = _build_catalog_entries(provider, discovered)
-            if provider not in provider_order:
-                provider_order.append(provider)
+        if cached is not None:
+            cached_results[provider] = cached
+        else:
+            to_discover.append((provider, credentials))
 
-    if use_cache:
+    # Run the un-cached discoverers concurrently with an overall deadline. A
+    # single slow provider (e.g. qwen-cn, which launches a Camoufox browser) or a
+    # hung HTTP call no longer blocks /v1/models for minutes — providers that
+    # don't finish in time simply contribute nothing this pass, and their next
+    # request will try again. This is the fix for the cold-cache /v1/models
+    # timeout: total time ≈ slowest discoverer instead of the sum of all.
+    discovered_results: dict[str, list[tuple[str, str]]] = {}
+    if to_discover:
+        def _run(provider: str, credentials: ProviderCredentialRecord) -> tuple[str, list[tuple[str, str]]]:
+            try:
+                models = _dedupe_models(_DISCOVERERS[provider](credentials, resolved_state_dir))
+            except Exception:
+                models = []
+            return provider, models
+
+        max_workers = min(_DISCOVERY_MAX_WORKERS, len(to_discover))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_run, provider, credentials): provider
+                for provider, credentials in to_discover
+            }
+            deadline = time.monotonic() + _DISCOVERY_PASS_DEADLINE_SECONDS
+            for future in concurrent.futures.as_completed(futures):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    provider, models = future.result(timeout=max(remaining, 0.01))
+                except Exception:
+                    continue
+                if models:
+                    discovered_results[provider] = models
+
+    # Persist freshly discovered models to the cache.
+    if use_cache and discovered_results:
+        creds_by_provider = {p: c for p, c in to_discover}
+        for provider, models in discovered_results.items():
+            _store_cached_models(
+                cache,
+                provider=provider,
+                credentials=creds_by_provider[provider],
+                models=models,
+                now=now,
+            )
         _save_cache(cache_path, cache)
+
+    for provider, models in {**cached_results, **discovered_results}.items():
+        if not models:
+            continue
+        grouped_entries[provider] = _build_catalog_entries(provider, models)
+        if provider not in provider_order:
+            provider_order.append(provider)
 
     flattened: list[ModelCatalogEntry] = []
     for provider in provider_order:

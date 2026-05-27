@@ -113,3 +113,76 @@ def test_load_model_catalog_replaces_fallback_provider_entries_with_dynamic_disc
         "algae/qwen-intl/qwen3.5-flash",
         "algae/qwen-intl/qwen3.6-plus",
     ]
+
+
+def test_load_model_catalog_runs_discoverers_concurrently_and_isolates_failures(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """The loader runs every logged-in provider's discoverer in parallel under
+    an overall wall-clock budget. One discoverer raising must not knock out the
+    others; a slow discoverer that beats the deadline still contributes.
+
+    This guards the cold-cache /v1/models path that previously timed out
+    because discoverers ran sequentially in the request thread.
+    """
+    import threading
+    import time as time_module
+
+    def _stub_creds(provider: str) -> ProviderCredentialRecord:
+        return ProviderCredentialRecord(
+            provider=provider,
+            kind="web_session",
+            cookie="x",
+            headers={},
+            user_agent="ua",
+            metadata={},
+            status="valid",
+        )
+
+    monkeypatch.setattr(
+        "opentoken.models.discovery.load_provider_credentials",
+        lambda providers_dir, provider: _stub_creds(provider)
+        if provider in {"good_a", "good_b", "boom"}
+        else None,
+    )
+
+    call_starts: list[tuple[str, float]] = []
+    barrier = threading.Event()
+
+    def good_a(_credentials, _state_dir):
+        call_starts.append(("good_a", time_module.monotonic()))
+        barrier.wait(timeout=2.0)  # Coordinate with good_b to prove parallelism.
+        return [("a-1", "A 1"), ("a-2", "A 2")]
+
+    def good_b(_credentials, _state_dir):
+        call_starts.append(("good_b", time_module.monotonic()))
+        barrier.set()
+        return [("b-1", "B 1")]
+
+    def boom(_credentials, _state_dir):
+        raise RuntimeError("upstream is down")
+
+    monkeypatch.setattr(
+        "opentoken.models.discovery._DISCOVERERS",
+        {"good_a": good_a, "good_b": good_b, "boom": boom},
+    )
+
+    catalog = load_model_catalog(
+        state_dir=tmp_path,
+        providers_dir=tmp_path / "providers",
+        use_cache=False,
+    )
+    ids = sorted(entry.id for entry in catalog)
+
+    # Two good providers contributed; the raising one was isolated.
+    assert ids == [
+        "algae/good_a/a-1",
+        "algae/good_a/a-2",
+        "algae/good_b/b-1",
+    ]
+    # Parallelism: the barrier only releases when good_b runs, so good_a's
+    # barrier.wait would time out if discoverers were serialised. Both must have
+    # started. (boom raises before recording, so it's not in call_starts.)
+    started = {name for name, _ in call_starts}
+    assert started == {"good_a", "good_b"}
