@@ -21,8 +21,15 @@ def normalize_chat_completions_request(payload: dict[str, object]) -> Normalized
     _require_model(payload)
     normalized_payload = dict(payload)
     messages = payload.get("messages", [])
-    if isinstance(messages, list):
-        normalized_payload["messages"] = _resolve_message_attachments(messages)
+    if not isinstance(messages, list):
+        raise RuntimeError("messages must be a list.")
+    if not messages:
+        # Catch this as 400 invalid_request_error here, rather than letting
+        # the provider-side prompt builder raise a RuntimeError that bubbles
+        # all the way to a 502 — that masked a client request error as an
+        # upstream failure.
+        raise RuntimeError("messages must contain at least one entry.")
+    normalized_payload["messages"] = _resolve_message_attachments(messages)
     return NormalizedChatRequest.model_validate(normalized_payload)
 
 

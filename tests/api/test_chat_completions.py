@@ -809,3 +809,26 @@ def test_request_body_size_cap_allows_normal_requests(monkeypatch) -> None:
         json={"model": "algae/deepseek/deepseek-chat", "messages": [{"role": "user", "content": "hello"}]},
     )
     assert response.status_code == 200
+
+
+def test_chat_completions_rejects_empty_messages_as_400(monkeypatch) -> None:
+    monkeypatch.setattr(chat_route_module, "get_default_router", lambda: FakeRouter())
+    client = TestClient(create_app())
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "algae/deepseek/deepseek-chat", "messages": []},
+    )
+    # Empty messages is a malformed request (400), not an upstream failure (502).
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_chat_completions_rejects_non_list_messages_as_400(monkeypatch) -> None:
+    monkeypatch.setattr(chat_route_module, "get_default_router", lambda: FakeRouter())
+    client = TestClient(create_app())
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "algae/deepseek/deepseek-chat", "messages": "hello"},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
