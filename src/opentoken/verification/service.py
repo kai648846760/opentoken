@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -7,12 +8,18 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from opentoken.api.app import create_app
-from opentoken.browser.common import probe_camoufox_runtime
+from opentoken.browser.common import CamoufoxRuntimeStatus, probe_camoufox_runtime
 from opentoken.config.app_config import load_or_create_app_config
 from opentoken.config.paths import resolve_app_config_path, resolve_providers_dir
 from opentoken.models.discovery import load_model_catalog
 from opentoken.providers.registry import get_provider_definition, list_supported_providers
 from opentoken.storage.provider_store import list_provider_credentials
+
+
+# Concurrent per-provider verification. The browser worker thread serialises
+# within a provider, so we just bound across providers to keep CPU/memory
+# manageable.
+_VERIFY_MAX_WORKERS = 8
 
 
 _CAMOUFOX_RUNTIME_PROVIDERS = frozenset(
@@ -59,76 +66,91 @@ def run_verification_suite(*, requested_providers: tuple[str, ...] = ()) -> Veri
     default_models = _default_provider_models()
     app_config = load_or_create_app_config(resolve_app_config_path())
     headers = {"authorization": f"Bearer {app_config['api_key']}"}
-    results: list[ProviderVerificationResult] = []
     camoufox_runtime = probe_camoufox_runtime()
 
     with TestClient(create_app()) as client:
-        for provider in targets:
-            definition = get_provider_definition(provider)
-            display_name = definition.display_name if definition is not None else provider
-            model = default_models.get(provider)
-
-            if provider not in provider_records:
-                results.append(
-                    ProviderVerificationResult(
-                        provider=provider,
-                        display_name=display_name,
-                        model=model,
-                        status="not_logged_in",
-                        checks=(),
-                    )
-                )
-                continue
-
-            if provider in _CAMOUFOX_RUNTIME_PROVIDERS and not camoufox_runtime.browser_installed:
-                checks = (
-                    _verify_models(client, headers, provider, model),
-                    _failed_detail("chat", _camoufox_runtime_missing_detail(camoufox_runtime.install_hint)),
-                    _failed_detail(
-                        "chat_stream",
-                        _camoufox_runtime_missing_detail(camoufox_runtime.install_hint),
-                    ),
-                    _failed_detail(
-                        "responses",
-                        _camoufox_runtime_missing_detail(camoufox_runtime.install_hint),
-                    ),
-                    _failed_detail(
-                        "responses_stream",
-                        _camoufox_runtime_missing_detail(camoufox_runtime.install_hint),
-                    ),
-                )
-                results.append(
-                    ProviderVerificationResult(
-                        provider=provider,
-                        display_name=display_name,
-                        model=model,
-                        status="failed",
-                        checks=checks,
-                    )
-                )
-                continue
-
-            checks = (
-                _verify_models(client, headers, provider, model),
-                _verify_chat_completion(client, headers, model),
-                _verify_chat_completion_stream(client, headers, model),
-                _verify_responses(client, headers, model),
-                _verify_responses_stream(client, headers, model),
-            )
-            status = "passed" if all(check.status == "passed" for check in checks) else "failed"
-            results.append(
-                ProviderVerificationResult(
-                    provider=provider,
-                    display_name=display_name,
-                    model=model,
-                    status=status,
-                    checks=checks,
-                )
+        def verify(provider: str) -> ProviderVerificationResult:
+            return _verify_one_provider(
+                client=client,
+                headers=headers,
+                provider=provider,
+                model=default_models.get(provider),
+                provider_records=provider_records,
+                camoufox_runtime=camoufox_runtime,
             )
 
+        # Verify providers concurrently. Each provider's live checks are slow
+        # (browser launch, multi-second upstream calls), and they're fully
+        # independent — running them serially made `opentoken verify` take
+        # minutes and risk appearing to hang. The browser worker threads still
+        # serialise calls *within* a provider, so this only parallelises across
+        # distinct providers. Results are reassembled in the requested order.
+        results_by_provider: dict[str, ProviderVerificationResult] = {}
+        max_workers = min(_VERIFY_MAX_WORKERS, max(len(targets), 1))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(verify, provider): provider for provider in targets}
+            for future in concurrent.futures.as_completed(futures):
+                provider = futures[future]
+                results_by_provider[provider] = future.result()
+
+    results = [results_by_provider[provider] for provider in targets]
     return VerificationReport(
         requested_providers=requested_providers,
         results=tuple(results),
+    )
+
+
+def _verify_one_provider(
+    *,
+    client: TestClient,
+    headers: dict[str, str],
+    provider: str,
+    model: str | None,
+    provider_records: dict[str, object],
+    camoufox_runtime: CamoufoxRuntimeStatus,
+) -> ProviderVerificationResult:
+    definition = get_provider_definition(provider)
+    display_name = definition.display_name if definition is not None else provider
+
+    if provider not in provider_records:
+        return ProviderVerificationResult(
+            provider=provider,
+            display_name=display_name,
+            model=model,
+            status="not_logged_in",
+            checks=(),
+        )
+
+    if provider in _CAMOUFOX_RUNTIME_PROVIDERS and not camoufox_runtime.browser_installed:
+        checks = (
+            _verify_models(client, headers, provider, model),
+            _failed_detail("chat", _camoufox_runtime_missing_detail(camoufox_runtime.install_hint)),
+            _failed_detail("chat_stream", _camoufox_runtime_missing_detail(camoufox_runtime.install_hint)),
+            _failed_detail("responses", _camoufox_runtime_missing_detail(camoufox_runtime.install_hint)),
+            _failed_detail("responses_stream", _camoufox_runtime_missing_detail(camoufox_runtime.install_hint)),
+        )
+        return ProviderVerificationResult(
+            provider=provider,
+            display_name=display_name,
+            model=model,
+            status="failed",
+            checks=checks,
+        )
+
+    checks = (
+        _verify_models(client, headers, provider, model),
+        _verify_chat_completion(client, headers, model),
+        _verify_chat_completion_stream(client, headers, model),
+        _verify_responses(client, headers, model),
+        _verify_responses_stream(client, headers, model),
+    )
+    status = "passed" if all(check.status == "passed" for check in checks) else "failed"
+    return ProviderVerificationResult(
+        provider=provider,
+        display_name=display_name,
+        model=model,
+        status=status,
+        checks=checks,
     )
 
 
