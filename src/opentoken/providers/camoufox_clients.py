@@ -1668,6 +1668,28 @@ def _get_or_create_browser_session(*, provider: str, state_dir, headless: bool) 
     return new_session
 
 
+def _sweep_stale_recovery_dirs(browser_state_dir, *, max_age_seconds: float) -> None:
+    parent = browser_state_dir.parent
+    prefix = f"{browser_state_dir.name}-recovery-"
+    now = time.time()
+    try:
+        children = list(parent.iterdir())
+    except OSError:
+        return
+    for child in children:
+        if not child.name.startswith(prefix):
+            continue
+        try:
+            if not child.is_dir():
+                continue
+            age = now - child.stat().st_mtime
+        except OSError:
+            continue
+        if age < max_age_seconds:
+            continue
+        shutil.rmtree(child, ignore_errors=True)
+
+
 def _launch_browser_context_with_profile_recovery(*, sync_playwright, browser_state_dir, headless: bool):
     manager = sync_playwright()
     manager_entered = False
@@ -1694,6 +1716,12 @@ def _launch_browser_context_with_profile_recovery(*, sync_playwright, browser_st
                     pass
                 manager_entered = False
 
+            # Sweep stale recovery dirs from previous retries before creating a
+            # new one. Without this, every Firefox-already-open retry accumulates
+            # a `{name}-recovery-{ms}` sibling forever and eventually fills the
+            # disk. We keep anything younger than an hour (might be in active use
+            # by a concurrent process) and delete the rest.
+            _sweep_stale_recovery_dirs(browser_state_dir, max_age_seconds=3600)
             recovery_dir = browser_state_dir.parent / f"{browser_state_dir.name}-recovery-{int(time.time() * 1000)}"
             recovery_dir.mkdir(parents=True, exist_ok=True)
 
