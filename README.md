@@ -117,6 +117,24 @@ opentoken 早期版本在 `models/catalog.py` 里写死了一份 33 项的模型
 - **`/v1/embeddings` 改成 501 not_implemented**。原实现是 SHA-256 派生的伪向量（256 维、无归一化、忽略 model 名），把它当 RAG / 向量检索数据源会得到高熵噪声。现在直接返回 501，让上层路由到真实 backend（NIM / 你自己的 sentence-transformer）。
 - **新增 E2E 烟雾脚本**：`scripts/live_provider_smoke.py`，对每个已登录 provider 跑一次非流 + 流的 chat completion，写一份 JSON 报告。比 200-case suite 快 10 倍以上。
 
+### 第二轮加固（在上述基础上进一步打磨）
+
+- **凭证文件 0600 权限**：`~/.opentoken/config.json`、`~/.opentoken/providers/*.json`、`~/.opentoken/auth-profiles.json` 写入时强制 owner-only，多用户主机上别人没法直接 `cat` 出 cookie / api key。
+- **JSON body 大小上限**：`/v1/chat/completions` / `/v1/responses` 等 JSON 端点加 25 MiB 上限（基于 Content-Length 头），拒掉用大 body 打爆 worker 内存的 DoS 尝试。`/v1/uploads/{id}/parts` 单 part 100 MiB cap + 声明 bytes ≤ 8 GiB。
+- **401 一致契约**：8 个 HTTP provider（claude、chatgpt、gemini、grok、mimo、kimi、qwen-intl、qwen-cn）的上游 401/403 现在统一映射成 401 `authentication_error`（提示 `opentoken login <provider>` 重登），而不是过去那种 502 `api_error`。
+- **错误分类器**：`/v1/chat/completions` 和 `/v1/responses` 共享 `classify_provider_runtime_error`：`Unsupported model` → 400；缺凭证 / session expired → 401；其余上游失败 → 502。
+- **请求 body 校验提前**：空 `messages` / 非 list `messages` 在请求归一化阶段就 400 拒绝，不再让它沉到 provider 里返 502。
+- **/v1/responses 流式 error 事件平字段**：`{"type":"error","code":..,"message":..,"param":..}`（符合 OpenAI Responses SSE 协议），不再嵌套 `error` 对象。
+- **token usage 估算覆盖 responses**：`/v1/responses` 的 `usage` 也从硬编码 0 改成 char-based 估算，和 `/v1/chat/completions` 一致。
+- **`monotonic` 时钟**：50+ 处 polling/stream deadline 从 `time.time()` 改为 `time.monotonic()`，NTP / 手动调时不再造成提前超时或永远不超时。
+- **NIM 推理透传**：DeepSeek R1 等模型的 `reasoning_content` 字段不再被丢弃，会被包进 `<think>...</think>` 经 projector 路径正常处理。
+- **跨模型 fallback 流式可用**：`stream_with_chain` 现在 prime 第一个 chunk —— lazy generator 在首字节出来时才打的 429 也能正确触发链表降级（之前会漏 fallback）。
+- **discovery 并发跑**：`/v1/models` 冷缓存从 >30s 超时 → ~16s（瓶颈是 qwen-cn 浏览器启动，HTTP discoverers 并发完成）。缓存写入原子化。
+- **`opentoken verify` 并发跑**：每 provider 独立线程，单个慢 provider 不再阻塞整轮验证。
+- **登录 dry-run 接线**：浏览器登录时若已有有效凭证，新捕获的凭证必须通过 `verification/credentials_probe` 的 authenticated probe 才能覆盖，避免半成 harvest 破坏现有可用 cookie；首次登录跳过 probe。
+- **Camoufox recovery 目录清理**：Firefox 占用错误时新建的 `<name>-recovery-<ms>` profile 目录，超 1 小时未用的会被回收，不再无限堆积。
+- **dead code 清理**：删掉 `streaming.py` 里 5 个永远没人调的（且逻辑本身有 bug 的）heartbeat helper。
+
 ---
 
 ## 环境要求
