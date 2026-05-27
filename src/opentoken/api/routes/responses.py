@@ -15,6 +15,7 @@ from opentoken.api.streaming import (
     sse_response_headers,
     strip_tool_protocol_markup,
 )
+from opentoken.api.usage import estimate_prompt_tokens, estimate_tokens
 from opentoken.config.paths import resolve_state_dir
 from opentoken.gateway.normalized import normalize_responses_request
 from opentoken.gateway.router import get_default_router
@@ -93,6 +94,7 @@ def responses(payload: dict[str, object]) -> dict[str, object]:
     response_id = f"resp-{uuid4().hex}"
     output = _build_response_output(response)
     _save_response_history(response_id=response_id, request=request, response=response)
+    rendered_text = strip_tool_protocol_markup(response.content) or ""
     return {
         "id": response_id,
         "object": "response",
@@ -100,7 +102,7 @@ def responses(payload: dict[str, object]) -> dict[str, object]:
         "status": "incomplete" if response.tool_calls else "completed",
         "model": response.model,
         "output": output,
-        "usage": _empty_response_usage(),
+        "usage": _estimate_response_usage(request, rendered_text),
     }
 
 
@@ -211,7 +213,7 @@ def _stream_response_events(
                 status="completed",
                 model=request.model,
                 output=completed_output,
-                usage=usage,
+                usage=_estimate_response_usage(request, rendered_content),
             )
             _save_response_history(
                 response_id=response_id,
@@ -300,7 +302,7 @@ def _stream_response_events(
         status="incomplete" if tool_calls else "completed",
         model=response.model,
         output=completed_output,
-        usage=usage,
+        usage=_estimate_response_usage(request, rendered_content),
     )
     _save_response_history(response_id=response_id, request=request, response=response)
     yield from _sse_event(
@@ -401,13 +403,25 @@ def _reasoning_output_item(
 
 
 def _empty_response_usage() -> dict[str, object]:
+    return _response_usage(input_tokens=0, output_tokens=0)
+
+
+def _response_usage(*, input_tokens: int, output_tokens: int) -> dict[str, object]:
     return {
-        "input_tokens": 0,
+        "input_tokens": input_tokens,
         "input_tokens_details": {"cached_tokens": 0},
-        "output_tokens": 0,
+        "output_tokens": output_tokens,
         "output_tokens_details": {"reasoning_tokens": 0},
-        "total_tokens": 0,
+        "total_tokens": input_tokens + output_tokens,
     }
+
+
+def _estimate_response_usage(request, output_text: str) -> dict[str, object]:
+    prompt_tokens = estimate_prompt_tokens(getattr(request, "messages", None))
+    return _response_usage(
+        input_tokens=prompt_tokens,
+        output_tokens=estimate_tokens(output_text or ""),
+    )
 
 
 def _response_resource(

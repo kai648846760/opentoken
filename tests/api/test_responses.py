@@ -46,13 +46,13 @@ def test_responses_returns_openai_style_response(monkeypatch) -> None:
     assert payload["output"][0]["role"] == "assistant"
     assert payload["output"][0]["content"] == [{"type": "output_text", "text": "provider answer"}]
     assert payload["output"][0]["content"][0]["text"] == "provider answer"
-    assert payload["usage"] == {
-        "input_tokens": 0,
-        "input_tokens_details": {"cached_tokens": 0},
-        "output_tokens": 0,
-        "output_tokens_details": {"reasoning_tokens": 0},
-        "total_tokens": 0,
-    }
+    # usage is now estimated (char-based), not hardcoded zero. Assert structure
+    # and that output tokens reflect the non-empty answer.
+    usage = payload["usage"]
+    assert usage["input_tokens_details"] == {"cached_tokens": 0}
+    assert usage["output_tokens_details"] == {"reasoning_tokens": 0}
+    assert usage["output_tokens"] > 0
+    assert usage["total_tokens"] == usage["input_tokens"] + usage["output_tokens"]
 
 
 def test_responses_route_reuses_provider_router(monkeypatch) -> None:
