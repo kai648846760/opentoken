@@ -607,6 +607,17 @@ uv run opentoken start --host 0.0.0.0 --port 32117
 
 预期行为。详见 "OpenAI-compatible 调用方式 → Embeddings"。
 
+### 9）浏览器 provider 报 `NS_ERROR_PROXY_CONNECTION_REFUSED`
+
+doubao / glm-cn / glm-intl / qwen-cn 这些走 Camoufox（真实 Firefox）的 provider，如果报这个错，说明 Camoufox 继承了**系统级代理设置**（macOS 系统设置 → 网络 → 代理，或 Linux 的 `gsettings`/桌面代理），而那个代理当前连不通。
+
+注意：opentoken 自己的 HTTP provider 用 `trust_env=False` 已经绕过了 `HTTP_PROXY` 环境变量，但 Camoufox 启动的是真实 Firefox，它读的是**操作系统的代理配置**，不受 env 影响。
+
+排查：
+- 关掉系统代理（或确保代理可达），重试浏览器 provider。
+- 纯 HTTP 的 provider（deepseek / nim / unified / manus / kimi）不受此影响。
+- 这是环境问题，不是网关 bug——同一台机器换到无代理网络后这些 provider 即可恢复。
+
 ---
 
 ## 开发与测试
