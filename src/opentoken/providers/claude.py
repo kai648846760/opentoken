@@ -13,7 +13,7 @@ from opentoken.gateway.normalized import NormalizedChatRequest
 from opentoken.models.model_aliases import normalize_provider_model
 from opentoken.models.provider_credentials import ProviderCredentialRecord
 from opentoken.providers._client_cache import BoundedClientCache
-from opentoken.providers.base import ChatResponse, ProviderAdapter
+from opentoken.providers.base import ChatResponse, ProviderAdapter, raise_for_provider_auth
 from opentoken.providers.prompts import build_role_prompt
 from opentoken.providers.web_tool_calling import (
     build_web_tool_prompt,
@@ -78,7 +78,7 @@ class ClaudeWebClient:
             f"{self._base_url}/organizations",
             headers=self.build_headers(),
         )
-        _raise_for_claude_auth(response.status_code)
+        raise_for_provider_auth(response.status_code, provider="Claude", login_command="opentoken login claude")
         response.raise_for_status()
         payload = response.json()
         if isinstance(payload, list) and payload:
@@ -107,7 +107,7 @@ class ClaudeWebClient:
                 "uuid": str(uuid4()),
             },
         )
-        _raise_for_claude_auth(response.status_code)
+        raise_for_provider_auth(response.status_code, provider="Claude", login_command="opentoken login claude")
         response.raise_for_status()
         payload = response.json()
         conversation_id = payload.get("uuid") or payload.get("id")
@@ -140,7 +140,7 @@ class ClaudeWebClient:
                 "tools": [],
             },
         )
-        _raise_for_claude_auth(response.status_code)
+        raise_for_provider_auth(response.status_code, provider="Claude", login_command="opentoken login claude")
         response.raise_for_status()
         content = _parse_claude_sse_text(response.text)
         if not content:
@@ -173,7 +173,7 @@ class ClaudeWebClient:
                 "tools": [],
             },
         ) as response:
-            _raise_for_claude_auth(response.status_code)
+            raise_for_provider_auth(response.status_code, provider="Claude", login_command="opentoken login claude")
             response.raise_for_status()
             for raw_line in response.iter_lines():
                 line = raw_line.strip()
@@ -271,18 +271,6 @@ class ClaudeWebAdapter(ProviderAdapter):
         return stream_method(
             message=build_role_prompt(request),
             model=model,
-        )
-
-
-def _raise_for_claude_auth(status_code: int) -> None:
-    """Convert claude.ai auth failures into a friendly RuntimeError that the
-    gateway's error classifier maps to 401 authentication_error. Without this,
-    a 401/403 would fall through to response.raise_for_status() -> httpx
-    HTTPStatusError -> the route's 502 api_error bucket, hiding the real fix
-    (re-login) behind an opaque upstream-error message."""
-    if status_code in (401, 403):
-        raise RuntimeError(
-            "Claude session expired or invalid. Run `opentoken login claude` to refresh."
         )
 
 
