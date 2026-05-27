@@ -27,6 +27,20 @@ _DISCOVERY_MAX_WORKERS = 8
 # list is a soft failure (provider unreachable, schema changed, …) — the loader
 # will fall back to the cached/static catalog for that provider only.
 
+# Minimal known-good wire models per provider, used ONLY as a last resort: the
+# provider is logged in, but live discovery returned nothing (e.g. the page is
+# now fully JS-rendered so the HTML scrape finds no model list, or a gRPC-only
+# provider has no listing endpoint). Without this, a logged-in provider whose
+# discovery breaks vanishes entirely from /v1/models and can't be exercised —
+# which is wrong, since the provider itself still works when called with a known
+# model id. This is NOT the old "hardcoded catalog": live discovery is always
+# tried first and wins; these are only the floor so a working login is never
+# invisible. Model ids are the canonical wire ids each adapter accepts.
+_FALLBACK_MODELS: dict[str, list[tuple[str, str]]] = {
+    "qwen-intl": [("qwen3.6-plus", "Qwen 3.6 Plus"), ("qwen-max-latest", "Qwen Max")],
+    "kimi": [("k2", "Kimi K2"), ("k1", "Kimi K1")],
+}
+
 _DISCOVERY_TTL_SECONDS = 60 * 60 * 6
 _QWEN_INTL_MODEL_PATTERN = re.compile(
     r'"id":"([A-Za-z0-9_.:-]+)"\s*,\s*"name":"([^"]+)"\s*,\s*"object":"model"'
@@ -831,7 +845,21 @@ def load_model_catalog(
             )
         _save_cache(cache_path, cache)
 
-    for provider, models in {**cached_results, **discovered_results}.items():
+    # Floor for logged-in providers whose live discovery yielded nothing this
+    # pass (qwen-intl's catalog page is now JS-rendered, Kimi's lives behind a
+    # gRPC-Connect endpoint we don't speak). Without this the provider vanishes
+    # from /v1/models even though chat against a known wire id still works,
+    # which made the smoke script skip them. Not cached — every pass retries
+    # live first; the fallback only kicks in when discovery has actually failed.
+    fallback_results: dict[str, list[tuple[str, str]]] = {}
+    for provider, _credentials in to_discover:
+        if provider in discovered_results:
+            continue
+        floor = _FALLBACK_MODELS.get(provider)
+        if floor:
+            fallback_results[provider] = list(floor)
+
+    for provider, models in {**cached_results, **discovered_results, **fallback_results}.items():
         if not models:
             continue
         grouped_entries[provider] = _build_catalog_entries(provider, models)

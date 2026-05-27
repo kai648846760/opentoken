@@ -115,6 +115,87 @@ def test_load_model_catalog_replaces_fallback_provider_entries_with_dynamic_disc
     ]
 
 
+def test_load_model_catalog_falls_back_for_logged_in_provider_when_discovery_empty(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A logged-in provider whose live discovery yields nothing must still
+    surface its known wire models, so /v1/models lists it and the smoke script
+    can test it. This is the floor for JS-rendered (qwen-intl) / gRPC (kimi)
+    catalogs we can't scrape — live discovery is still tried first and wins."""
+    credentials = ProviderCredentialRecord(
+        provider="kimi",
+        kind="web_session",
+        cookie="session=1",
+        headers={},
+        user_agent="ua",
+        metadata={},
+        status="valid",
+    )
+
+    monkeypatch.setattr(
+        "opentoken.models.discovery.load_provider_credentials",
+        lambda providers_dir, provider: credentials if provider == "kimi" else None,
+    )
+    # Discoverer runs but finds nothing (page shape changed / endpoint moved).
+    monkeypatch.setattr(
+        "opentoken.models.discovery._DISCOVERERS",
+        {"kimi": lambda credentials, state_dir: []},
+    )
+    monkeypatch.setattr(
+        "opentoken.models.discovery._FALLBACK_MODELS",
+        {"kimi": [("k2", "Kimi K2"), ("k1", "Kimi K1")]},
+    )
+
+    catalog = load_model_catalog(
+        state_dir=tmp_path,
+        providers_dir=tmp_path / "providers",
+        use_cache=False,
+    )
+    kimi_models = sorted(entry.id for entry in catalog if "/kimi/" in entry.id)
+
+    assert kimi_models == ["algae/kimi/k1", "algae/kimi/k2"]
+
+
+def test_load_model_catalog_prefers_live_discovery_over_fallback(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """When live discovery succeeds, the fallback floor must not leak in — the
+    listed models are exactly what the provider page returned."""
+    credentials = ProviderCredentialRecord(
+        provider="kimi",
+        kind="web_session",
+        cookie="session=1",
+        headers={},
+        user_agent="ua",
+        metadata={},
+        status="valid",
+    )
+
+    monkeypatch.setattr(
+        "opentoken.models.discovery.load_provider_credentials",
+        lambda providers_dir, provider: credentials if provider == "kimi" else None,
+    )
+    monkeypatch.setattr(
+        "opentoken.models.discovery._DISCOVERERS",
+        {"kimi": lambda credentials, state_dir: [("k3", "Kimi K3")]},
+    )
+    monkeypatch.setattr(
+        "opentoken.models.discovery._FALLBACK_MODELS",
+        {"kimi": [("k2", "Kimi K2"), ("k1", "Kimi K1")]},
+    )
+
+    catalog = load_model_catalog(
+        state_dir=tmp_path,
+        providers_dir=tmp_path / "providers",
+        use_cache=False,
+    )
+    kimi_models = sorted(entry.id for entry in catalog if "/kimi/" in entry.id)
+
+    assert kimi_models == ["algae/kimi/k3"]
+
+
 def test_load_model_catalog_runs_discoverers_concurrently_and_isolates_failures(
     monkeypatch,
     tmp_path,
