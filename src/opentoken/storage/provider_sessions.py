@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from opentoken.storage._atomic import write_json_atomic
+from opentoken.storage._atomic import file_lock, write_json_atomic
 from opentoken.models.provider_credentials import ProviderCredentialRecord
 
 
@@ -27,10 +27,14 @@ def save_provider_session(
     state: dict[str, str],
 ) -> Path:
     path = _resolve_session_store_path(state_dir)
-    store = _load_store(path)
-    store[_session_key(provider, credentials)] = dict(state)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_json_atomic(path, store, sensitive=True)
+    # Lock the read-modify-write: this store is keyed by (provider, credential
+    # fingerprint), so concurrent saves for DIFFERENT providers/accounts would
+    # otherwise lose each other's updates (both read the old store, each writes
+    # back only its own key). file_store/response_store already do this.
+    with file_lock(path):
+        store = _load_store(path)
+        store[_session_key(provider, credentials)] = dict(state)
+        write_json_atomic(path, store, sensitive=True)
     return path
 
 

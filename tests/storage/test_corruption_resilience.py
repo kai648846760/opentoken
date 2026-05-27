@@ -82,3 +82,44 @@ def test_upload_store_survives_corrupt_store(tmp_path: Path, bad: str) -> None:
         tmp_path, filename="j.txt", expected_bytes=2, purpose="assistants", mime_type="text/plain"
     )
     assert created["id"].startswith("upload")
+
+
+def test_provider_sessions_concurrent_saves_do_not_lose_updates(tmp_path) -> None:
+    """save_provider_session locks its read-modify-write so concurrent saves
+    for different providers don't clobber each other (lost-update race)."""
+    import threading
+    from opentoken.storage import provider_sessions
+
+    def creds(provider: str) -> ProviderCredentialRecord:
+        return ProviderCredentialRecord(
+            provider=provider,
+            kind="web_session",
+            cookie=f"c-{provider}",
+            headers={},
+            user_agent="ua",
+            metadata={},
+            status="valid",
+        )
+
+    providers = [f"prov{i}" for i in range(12)]
+    barrier = threading.Barrier(len(providers))
+
+    def worker(provider: str) -> None:
+        barrier.wait()  # maximise overlap
+        provider_sessions.save_provider_session(
+            tmp_path,
+            provider=provider,
+            credentials=creds(provider),
+            state={"chat_id": provider},
+        )
+
+    threads = [threading.Thread(target=worker, args=(p,)) for p in providers]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Every provider's session must have survived — no lost updates.
+    for p in providers:
+        loaded = provider_sessions.load_provider_session(tmp_path, provider=p, credentials=creds(p))
+        assert loaded.get("chat_id") == p
