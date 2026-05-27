@@ -27,9 +27,22 @@ _MODEL_ALIASES: dict[str, dict[str, str]] = {
 }
 
 
+# Case-insensitive index: clients send model ids in arbitrary casing
+# ("Qwen-3.5-Turbo" vs "qwen-3.5-turbo"). The qwen-cn map already carries both
+# cases by hand, proving the intent was case-insensitive everywhere — without
+# this index, qwen-intl's lowercase-only keys silently passed mixed-case ids
+# straight through to the upstream, which then 400s. Built once at import.
+_LOWER_MODEL_ALIASES: dict[str, dict[str, str]] = {
+    provider: {key.lower(): value for key, value in aliases.items()}
+    for provider, aliases in _MODEL_ALIASES.items()
+}
+
+
 def normalize_provider_model(provider: str, model: str) -> str:
     aliases = _MODEL_ALIASES.get(provider, {})
-    return aliases.get(model, model)
+    if model in aliases:
+        return aliases[model]
+    return _LOWER_MODEL_ALIASES.get(provider, {}).get(model.lower(), model)
 
 
 

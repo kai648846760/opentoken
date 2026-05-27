@@ -119,8 +119,16 @@ def _resolve_prefixed_model(model_ref: str) -> ResolvedModelRef | None:
             return None
         # Some providers (NIM, LiteLLM-style unified backends) embed slashes in
         # their model ids themselves (e.g. "deepseek-ai/deepseek-r1"). Keep
-        # everything after the provider segment as the upstream model id.
-        provider_model = normalize_provider_model(provider, "/".join(parts[2:]))
+        # everything after the provider segment as the upstream model id — but
+        # reject empty segments ("algae/deepseek//foo", trailing slash
+        # "algae/deepseek/") which would otherwise yield a "/foo" or "" wire id
+        # that the adapter happily forwards instead of 404ing.
+        model_segments = parts[2:]
+        if any(not segment for segment in model_segments):
+            return None
+        provider_model = normalize_provider_model(provider, "/".join(model_segments))
+        if not provider_model:
+            return None
         return ResolvedModelRef(
             provider=provider,
             provider_model=provider_model,
@@ -130,7 +138,11 @@ def _resolve_prefixed_model(model_ref: str) -> ResolvedModelRef | None:
         provider = resolve_provider_key(parts[0])
         if provider is None:
             return None
+        if not parts[1]:
+            return None
         provider_model = normalize_provider_model(provider, parts[1])
+        if not provider_model:
+            return None
         return ResolvedModelRef(
             provider=provider,
             provider_model=provider_model,

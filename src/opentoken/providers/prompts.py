@@ -36,8 +36,13 @@ def stringify_message_content(content: object) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        text_parts: list[str] = []
-        attachment_parts: list[str] = []
+        # Preserve the ORDER items appear in. The previous implementation
+        # bucketed text and attachments into two lists and concatenated
+        # text-then-attachments, which destroyed interleaving: an array like
+        # [image, "what is in this image?"] rendered text-first, and
+        # [text, img, text, img] collapsed to both texts then both images, so
+        # "describe the second photo" lost which image it referred to.
+        parts: list[str] = []
         for item in content:
             if not isinstance(item, dict):
                 continue
@@ -45,15 +50,15 @@ def stringify_message_content(content: object) -> str:
             if item_type in {"text", "input_text", "output_text"} and isinstance(
                 item.get("text"), str
             ):
-                text_parts.append(item["text"])
+                parts.append(item["text"])
                 continue
             attachment_text = _stringify_attachment_item(item)
             if attachment_text:
-                attachment_parts.append(attachment_text)
+                parts.append(attachment_text)
             attachment_content = _extract_attachment_content(item)
             if attachment_content:
-                attachment_parts.append(attachment_content)
-        return "\n".join(part for part in [*text_parts, *attachment_parts] if part)
+                parts.append(attachment_content)
+        return "\n".join(part for part in parts if part)
     return str(content)
 
 

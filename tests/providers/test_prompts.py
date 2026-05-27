@@ -24,6 +24,22 @@ def test_stringify_message_content_keeps_attachment_markers() -> None:
     assert "[Attached file: report.pdf | https://example.com/report.pdf]" in content
 
 
+def test_stringify_message_content_preserves_interleaved_order() -> None:
+    """Items must render in the order they appear. Previously text was bucketed
+    ahead of all attachments, so [image, text] came out text-first and
+    positional references ('the second photo') were lost."""
+    content = stringify_message_content(
+        [
+            {"type": "input_image", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            {"type": "input_text", "text": "describe the image above"},
+        ]
+    )
+    lines = content.splitlines()
+    # The image marker must come BEFORE the text, matching input order.
+    assert lines[0].startswith("[Attached image")
+    assert lines[1] == "describe the image above"
+
+
 def test_stringify_message_content_embeds_text_file_contents_from_data_uri() -> None:
     content = stringify_message_content(
         [
