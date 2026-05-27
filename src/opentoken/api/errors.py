@@ -12,8 +12,11 @@ def classify_provider_runtime_error(exc: RuntimeError) -> tuple[int, str]:
     # something the gateway can't route): 400.
     if "unsupported model" in lowered or "no route configured" in lowered or "no adapter" in lowered:
         return 400, "invalid_request_error"
-    # Provider not logged in / session dead: 401 so clients hit their re-auth flow.
-    if "missing" in lowered and ("credential" in lowered or "api key" in lowered):
+    # Provider not logged in / session dead / key not configured: 401 so clients
+    # hit their re-auth flow.
+    if ("missing" in lowered or "required" in lowered) and (
+        "credential" in lowered or "api key" in lowered or "token" in lowered
+    ):
         return 401, "authentication_error"
     if "expired" in lowered or "re-login" in lowered or "re-log in" in lowered or "session expired" in lowered:
         return 401, "authentication_error"
