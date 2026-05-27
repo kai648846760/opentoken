@@ -208,6 +208,14 @@ class DoubaoWebClient:
                 line = raw_line.strip()
                 if raw_line:
                     captured_lines.append(raw_line)
+                    # Detect a throttle event in the stream. The non-stream path
+                    # raises on these codes, but the streaming path used to just
+                    # produce no content chunks, so a rate-limited request looked
+                    # like an empty/successful answer. Raise as soon as we see the
+                    # signal (it arrives before any content), surfacing 429 to the
+                    # caller instead of a silent empty stream.
+                    if _doubao_payload_is_rate_limited(raw_line):
+                        raise ProviderRateLimitError(_DOUBAO_RATE_LIMIT_MESSAGE)
                 if not line:
                     if current_event and current_data:
                         try:
@@ -401,21 +409,30 @@ def _extract_samantha_chunks(line: str) -> list[str]:
     return chunks
 
 
-def _parse_doubao_response_text(payload: str) -> str:
-    # Check for rate limit error first
+def _doubao_payload_is_rate_limited(payload: str) -> bool:
+    """Shared predicate for the non-stream and streaming paths so the latter
+    doesn't silently emit empty output when Doubao throttles a 200 stream."""
     lower_payload = payload.lower()
-    if (
+    return (
         "710022004" in payload
         or "710022002" in payload
         or ("rate limit" in lower_payload and ("stream_error" in lower_payload or '"event_type":2005' in lower_payload))
         or ("访问频繁" in payload and '"event_type":2005' in payload)
         or ("请稍后重试" in payload and '"event_type":2005' in payload)
         or ("\"message\":\"block\"" in lower_payload and '"event_type":2005' in lower_payload)
-    ):
-        raise ProviderRateLimitError(
-            "Doubao rate limit exceeded. Please wait 10-30 minutes or run "
-            "`opentoken login doubao` to refresh credentials."
-        )
+    )
+
+
+_DOUBAO_RATE_LIMIT_MESSAGE = (
+    "Doubao rate limit exceeded. Please wait 10-30 minutes or run "
+    "`opentoken login doubao` to refresh credentials."
+)
+
+
+def _parse_doubao_response_text(payload: str) -> str:
+    # Check for rate limit error first
+    if _doubao_payload_is_rate_limited(payload):
+        raise ProviderRateLimitError(_DOUBAO_RATE_LIMIT_MESSAGE)
 
     chunks: list[str] = []
     current_event: str | None = None

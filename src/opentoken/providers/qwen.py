@@ -684,17 +684,32 @@ def _parse_qwen_sse_text(payload: str) -> str:
 
 
 def _iter_qwen_sse_text_chunks(lines: Iterator[str]) -> Iterator[str]:
-    raw_payload = ""
+    # Accumulate phased segments incrementally instead of re-JSON-parsing the
+    # entire buffer on every line. The old loop appended each line to
+    # raw_payload and called _parse_qwen_sse_text(raw_payload) per line, which
+    # re-parsed all prior lines every time — O(n²) JSON work that hung long
+    # streams. Parsing only the new line and extending a persistent segment
+    # list yields the identical cumulative render (the segments are the same
+    # ones _parse_qwen_sse_text would have produced), then we diff to a delta.
+    segments: list[tuple[str, str]] = []
     emitted = ""
     for raw_line in lines:
-        raw_payload += f"{raw_line}\n"
         line = raw_line.strip()
-        if not line or not line.startswith("data:"):
+        # Match _parse_qwen_sse_text's own filter exactly ("data: " + slice[6:])
+        # so the accumulated segments are identical to the full re-parse.
+        if not line or not line.startswith("data: "):
             continue
-        data_str = line[5:].strip()
+        data_str = line[6:].strip()
         if data_str == "[DONE]" or not data_str:
             continue
-        candidate = _parse_qwen_sse_text(raw_payload)
+        try:
+            data = json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        segments.extend(_extract_qwen_intl_phased_segments(data))
+        candidate = _render_qwen_phased_text(segments)
         suffix, emitted = _advance_streamed_text_state(emitted, candidate)
         if suffix:
             yield suffix

@@ -2129,3 +2129,58 @@ def test_qwen_web_client_retries_with_fresh_chat_id_when_sse_has_no_visible_text
     assert response.content == "hello qwen retry"
     assert any(url.endswith("/api/v2/chats/new") for _, url in calls)
     assert any("chat_id=chat-fresh" in url for _, url in calls)
+
+
+def test_doubao_stream_raises_rate_limit_instead_of_empty_output() -> None:
+    """A throttle event in a 200 stream must raise ProviderRateLimitError, not
+    silently produce an empty completion (the non-stream path already does)."""
+    credentials = ProviderCredentialRecord(
+        provider="doubao",
+        kind="browser_session",
+        cookie="sessionid=test",
+        headers={},
+        user_agent="ua",
+        metadata={},
+        status="valid",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=(
+                'event: SSE_REPLY_ERROR\n'
+                'data: {"code":710022004,"message":"rate limit"}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = DoubaoWebClient(
+        credentials,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(ProviderRateLimitError):
+        list(client.iter_chat_completion_text(message="hi", model="doubao-seed-2.0"))
+
+
+def test_glm_cn_chat_maps_429_to_rate_limit_error() -> None:
+    """A 429 from chatglm.cn must surface as ProviderRateLimitError (→ 429),
+    not a generic HTTPStatusError (→ 502)."""
+    credentials = ProviderCredentialRecord(
+        provider="glm-cn",
+        kind="browser_session",
+        cookie="chatglm_token=value",
+        headers={},
+        user_agent="ua",
+        metadata={},
+        status="valid",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text="too many requests")
+
+    client = GLMApiClient(
+        credentials,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(ProviderRateLimitError):
+        client.chat_completion(message="hi", model="glm-4-plus")

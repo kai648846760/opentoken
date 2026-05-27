@@ -18,7 +18,23 @@ import httpx
 from opentoken.gateway.normalized import NormalizedChatRequest
 from opentoken.models.provider_credentials import ProviderCredentialRecord
 from opentoken.providers._client_cache import BoundedClientCache, close_httpx_backed_client
-from opentoken.providers.base import ChatResponse, ProviderAdapter, raise_for_provider_auth
+from opentoken.providers.base import (
+    ChatResponse,
+    ProviderAdapter,
+    ProviderRateLimitError,
+    raise_for_provider_auth,
+)
+
+
+def _raise_for_glm_rate_limit(status_code: int, *, label: str) -> None:
+    """Map 429 to ProviderRateLimitError so the gateway returns a proper
+    rate_limit_error instead of letting raise_for_status surface a generic
+    HTTPStatusError → 502 api_error. Callers invoke this between
+    raise_for_provider_auth (401/403) and raise_for_status."""
+    if status_code == 429:
+        raise ProviderRateLimitError(
+            f"{label} rate-limited. Please retry after a backoff."
+        )
 from opentoken.providers.prompts import build_role_prompt
 
 _GLM_SIGN_SECRET = "8a1317a7468aa3ad86e997d08f3f31cb"
@@ -330,7 +346,7 @@ class GLMApiClient:
         raise_for_provider_auth(
             response.status_code, provider="GLM", login_command="opentoken login glm china"
         )
-
+        _raise_for_glm_rate_limit(response.status_code, label="GLM China")
         response.raise_for_status()
         content, conversation_id = _parse_glm_sse_response(response.text)
         if conversation_id:
@@ -382,6 +398,7 @@ class GLMApiClient:
             raise_for_provider_auth(
                 response.status_code, provider="GLM", login_command="opentoken login glm china"
             )
+            _raise_for_glm_rate_limit(response.status_code, label="GLM China")
             response.raise_for_status()
             emitted = ""
             for raw_line in response.iter_lines():
@@ -821,6 +838,7 @@ class GLMIntlApiClient(GLMApiClient):
             headers=headers,
             json=completion_payload,
         ) as stream_response:
+            _raise_for_glm_rate_limit(stream_response.status_code, label="GLM International")
             stream_response.raise_for_status()
             for raw_line in stream_response.iter_lines():
                 line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
