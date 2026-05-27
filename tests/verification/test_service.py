@@ -141,6 +141,31 @@ def test_run_verification_suite_fails_fast_when_camoufox_runtime_is_missing(monk
             ),
         ),
     )
+    # The catalog now comes from live discovery; seed a doubao entry so the
+    # "model present in catalog" assertion can succeed without hitting the
+    # network. Both code paths read load_model_catalog — the verification
+    # service computes the default model id, and /v1/models reads the registry.
+    from opentoken.models.catalog import ModelCatalogEntry
+
+    catalog_entries = [
+        ModelCatalogEntry(
+            id="algae/doubao/doubao-seed-2.0",
+            provider="opentoken",
+            name="Doubao Seed 2.0",
+        ),
+    ]
+    monkeypatch.setattr(
+        verification_service_module,
+        "load_model_catalog",
+        lambda: list(catalog_entries),
+    )
+    import opentoken.gateway.model_registry as model_registry_module
+
+    monkeypatch.setattr(
+        model_registry_module,
+        "load_model_catalog",
+        lambda: list(catalog_entries),
+    )
 
     report = run_verification_suite(requested_providers=("doubao",))
 

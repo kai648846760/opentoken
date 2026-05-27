@@ -85,7 +85,9 @@ def test_router_accepts_unprefixed_opentoken_model_refs(tmp_path: Path) -> None:
     assert adapter.seen_request.model == "deepseek/deepseek-chat"
 
 
-def test_router_accepts_native_raw_model_ids(tmp_path: Path) -> None:
+def test_router_accepts_native_raw_model_ids(tmp_path: Path, monkeypatch) -> None:
+    from opentoken.models.catalog import ModelCatalogEntry
+
     providers_dir = tmp_path / "providers"
     save_provider_credentials(
         providers_dir,
@@ -97,6 +99,14 @@ def test_router_accepts_native_raw_model_ids(tmp_path: Path) -> None:
             user_agent="ua",
             status="valid",
         ),
+    )
+    # With the dynamic-catalog refactor, "deepseek-chat" only resolves to a
+    # provider if discovery returns it. Seed a minimal catalog directly.
+    monkeypatch.setattr(
+        "opentoken.models.openai_compat.load_model_catalog",
+        lambda providers_dir=None: [
+            ModelCatalogEntry(id="algae/deepseek/deepseek-chat", provider="opentoken", name="DeepSeek Chat"),
+        ],
     )
     adapter = RecordingAdapter()
     router = ProviderRouter(adapters={"deepseek": adapter}, providers_dir=providers_dir)

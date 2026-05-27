@@ -3,10 +3,15 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from opentoken.models.catalog import default_catalog
+from opentoken.models.discovery import load_model_catalog
 
 
 def build_algae_provider_patch(base_url: str, api_key: str) -> dict[str, object]:
+    # Pull the live discovered model list (per logged-in provider) instead of a
+    # hardcoded one. The previous behaviour wrote a stale list of ~30 baked-in
+    # model ids to the upstream OpenClaw config; if the user wasn't logged in
+    # to most of them, those entries would surface as 404s downstream.
+    catalog = load_model_catalog()
     return {
         'models': {
             'providers': {
@@ -14,7 +19,7 @@ def build_algae_provider_patch(base_url: str, api_key: str) -> dict[str, object]
                     'baseUrl': base_url,
                     'apiKey': api_key,
                     'api': 'openai-completions',
-                    'models': [entry.to_opentoken_dict() for entry in default_catalog()],
+                    'models': [entry.to_opentoken_dict() for entry in catalog],
                 }
             }
         }

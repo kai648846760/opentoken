@@ -15,6 +15,10 @@ from opentoken.providers.camoufox_clients import CamoufoxProviderClient
 from opentoken.storage.provider_sessions import credential_fingerprint
 from opentoken.storage.provider_store import load_provider_credentials
 
+# Each discoverer should return list[(provider_model_id, display_name)]; an empty
+# list is a soft failure (provider unreachable, schema changed, …) — the loader
+# will fall back to the cached/static catalog for that provider only.
+
 _DISCOVERY_TTL_SECONDS = 60 * 60 * 6
 _QWEN_INTL_MODEL_PATTERN = re.compile(
     r'"id":"([A-Za-z0-9_.:-]+)"\s*,\s*"name":"([^"]+)"\s*,\s*"object":"model"'
@@ -288,11 +292,449 @@ def _discover_glm_cn_models(
     return _extract_glm_cn_models_from_html(html)
 
 
+# ─── extra discoverers ────────────────────────────────────────────────────────
+# Below this point: discoverers for providers that previously only had hardcoded
+# catalog entries. Each follows the same contract: take credentials + state_dir,
+# return a list of (model_id, display_name) tuples. Any failure → return [].
+
+
+_DEEPSEEK_MODEL_HTML_PATTERN = re.compile(
+    r'"model_class":"(deepseek-[a-z0-9.-]+)"\s*,\s*"display_name":"([^"]+)"'
+)
+_DEEPSEEK_MODEL_JS_PATTERN = re.compile(
+    r'\{\s*"model"\s*:\s*"(deepseek-[a-z0-9.-]+)"\s*,\s*"label"\s*:\s*"([^"]+)"'
+)
+_KIMI_MODEL_PATTERN = re.compile(
+    r'"id"\s*:\s*"(k[12](?:-thinking|-search)?|moonshot-v1-[0-9a-z]+)"\s*,\s*"name"\s*:\s*"([^"]+)"'
+)
+_GLM_INTL_MODEL_PATTERN = re.compile(
+    r'"id"\s*:\s*"(glm-[a-z0-9.-]+)"\s*,\s*"name"\s*:\s*"([^"]+)"',
+    flags=re.IGNORECASE,
+)
+_GEMINI_MODEL_PATTERN = re.compile(
+    r'\["(gemini[-_][a-z0-9_.\-]+)"\s*,\s*"([^"]+)"',
+    flags=re.IGNORECASE,
+)
+_GROK_MODEL_PATTERN = re.compile(
+    r'"modelName"\s*:\s*"(grok-[a-z0-9.-]+)"\s*,\s*"displayName"\s*:\s*"([^"]+)"',
+    flags=re.IGNORECASE,
+)
+_MIMO_MODEL_PATTERN = re.compile(
+    r'"modelKey"\s*:\s*"([a-z0-9._-]*mimo[a-z0-9._-]*)"\s*,\s*"displayName"\s*:\s*"([^"]+)"',
+    flags=re.IGNORECASE,
+)
+_CHATGPT_MODEL_PATTERN = re.compile(
+    r'"slug"\s*:\s*"(gpt-[a-z0-9.-]+|o[1-9][a-z0-9.-]*)"\s*,\s*"title"\s*:\s*"([^"]+)"',
+    flags=re.IGNORECASE,
+)
+
+
+def _bearer_token_from_credentials(credentials: ProviderCredentialRecord) -> str | None:
+    if credentials.metadata:
+        api_key = str(credentials.metadata.get("api_key", "")).strip()
+        if api_key:
+            return api_key
+    if credentials.headers:
+        for key in ("authorization", "Authorization"):
+            value = str(credentials.headers.get(key, "")).strip()
+            if not value:
+                continue
+            return value[7:].strip() if value.lower().startswith("bearer ") else value
+    return None
+
+
+def _http_get_json(
+    *,
+    url: str,
+    credentials: ProviderCredentialRecord,
+    extra_headers: dict[str, str] | None = None,
+    timeout_seconds: float = 30.0,
+) -> object | None:
+    headers: dict[str, str] = {
+        "Accept": "application/json",
+        "User-Agent": credentials.user_agent or "Mozilla/5.0",
+    }
+    if credentials.cookie:
+        headers["Cookie"] = credentials.cookie
+    if extra_headers:
+        headers.update(extra_headers)
+    try:
+        with httpx.Client(timeout=timeout_seconds, trust_env=False, follow_redirects=False) as client:
+            response = client.get(url, headers=headers)
+        if response.status_code != 200:
+            return None
+        return response.json()
+    except Exception:
+        return None
+
+
+# ─── NVIDIA NIM (standard OpenAI /v1/models) ──────────────────────────────────
+
+
+def _discover_nim_models(
+    credentials: ProviderCredentialRecord,
+    _state_dir: Path,
+) -> list[tuple[str, str]]:
+    token = _bearer_token_from_credentials(credentials)
+    if not token:
+        return []
+    body = _http_get_json(
+        url="https://integrate.api.nvidia.com/v1/models",
+        credentials=credentials,
+        extra_headers={"Authorization": f"Bearer {token}"},
+    )
+    if not isinstance(body, dict):
+        return []
+    items = body.get("data")
+    if not isinstance(items, list):
+        return []
+    models: list[tuple[str, str]] = []
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        model_id = str(entry.get("id") or "").strip()
+        if not model_id:
+            continue
+        # NIM doesn't expose a separate display name; reuse the id, which already
+        # looks like "namespace/model".
+        models.append((model_id, model_id))
+    return _dedupe_models(models)
+
+
+# ─── Manus (their own model registry) ─────────────────────────────────────────
+
+
+def _discover_manus_models(
+    credentials: ProviderCredentialRecord,
+    _state_dir: Path,
+) -> list[tuple[str, str]]:
+    token = _bearer_token_from_credentials(credentials)
+    if not token:
+        return []
+    body = _http_get_json(
+        url="https://api.manus.im/api/v1/agents",
+        credentials=credentials,
+        extra_headers={"API_KEY": token},
+    )
+    if not isinstance(body, dict):
+        return []
+    items = body.get("agents") if isinstance(body.get("agents"), list) else body.get("data")
+    if not isinstance(items, list):
+        return []
+    models: list[tuple[str, str]] = []
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        agent_id = str(entry.get("id") or entry.get("agentId") or "").strip()
+        agent_name = str(entry.get("name") or entry.get("displayName") or agent_id).strip()
+        if agent_id and agent_name:
+            models.append((agent_id, agent_name))
+    return _dedupe_models(models)
+
+
+# ─── DeepSeek (chat.deepseek.com HTML bundle has model list) ──────────────────
+
+
+def _extract_deepseek_models_from_html(html: str) -> list[tuple[str, str]]:
+    models: list[tuple[str, str]] = []
+    for model_id, display in _DEEPSEEK_MODEL_HTML_PATTERN.findall(html):
+        models.append((model_id, display))
+    if not models:
+        for model_id, display in _DEEPSEEK_MODEL_JS_PATTERN.findall(html):
+            models.append((model_id, display))
+    return _dedupe_models(models)
+
+
+_DEEPSEEK_WIRE_MODELS: tuple[tuple[str, str], ...] = (
+    ("deepseek-chat", "DeepSeek Chat"),
+    ("deepseek-reasoner", "DeepSeek Reasoner"),
+)
+
+
+def _discover_deepseek_models(
+    credentials: ProviderCredentialRecord,
+    _state_dir: Path,
+) -> list[tuple[str, str]]:
+    # The deepseek web app is a JS SPA — its homepage HTML contains no model
+    # list. The protocol itself only supports two model "modes" (chat /
+    # reasoner) toggled via thinking_enabled, so the discovery contract here is:
+    # if the saved credentials still authenticate against /api/v0/users/current,
+    # the two wire models are available; otherwise we contribute nothing.
+    auth = ""
+    if credentials.headers:
+        auth = str(credentials.headers.get("authorization", "")).strip()
+    if not auth:
+        return []
+    body = _http_get_json(
+        url="https://chat.deepseek.com/api/v0/users/current",
+        credentials=credentials,
+        extra_headers={"Authorization": auth},
+    )
+    if not isinstance(body, dict):
+        return []
+    if body.get("code") != 0:
+        return []
+    return list(_DEEPSEEK_WIRE_MODELS)
+
+
+# ─── Kimi (kimi.com / kimi.moonshot.cn HTML) ──────────────────────────────────
+
+
+def _extract_kimi_models_from_html(html: str) -> list[tuple[str, str]]:
+    return _dedupe_models(list(_KIMI_MODEL_PATTERN.findall(html)))
+
+
+def _discover_kimi_models(
+    credentials: ProviderCredentialRecord,
+    _state_dir: Path,
+) -> list[tuple[str, str]]:
+    html = _fetch_text_page(url="https://kimi.com/", credentials=credentials)
+    return _extract_kimi_models_from_html(html)
+
+
+# ─── GLM International (chat.z.ai or similar) ─────────────────────────────────
+
+
+def _extract_glm_intl_models_from_payload(html: str) -> list[tuple[str, str]]:
+    return _dedupe_models(list(_GLM_INTL_MODEL_PATTERN.findall(html)))
+
+
+def _discover_glm_intl_models(
+    credentials: ProviderCredentialRecord,
+    _state_dir: Path,
+) -> list[tuple[str, str]]:
+    body = _http_get_json(
+        url="https://chat.z.ai/api/models",
+        credentials=credentials,
+    )
+    if isinstance(body, dict):
+        items = body.get("data") if isinstance(body.get("data"), list) else body.get("models")
+        if isinstance(items, list):
+            models: list[tuple[str, str]] = []
+            for entry in items:
+                if not isinstance(entry, dict):
+                    continue
+                model_id = str(entry.get("id") or entry.get("name") or "").strip()
+                display = str(entry.get("name") or model_id).strip()
+                if model_id:
+                    models.append((model_id, display))
+            if models:
+                return _dedupe_models(models)
+    # Fallback: scrape the home HTML for embedded model metadata
+    html = _fetch_text_page(url="https://chat.z.ai/", credentials=credentials)
+    return _extract_glm_intl_models_from_payload(html)
+
+
+# ─── ChatGPT (chat.openai.com/backend-api/models) ─────────────────────────────
+
+
+def _extract_chatgpt_models_from_html(html: str) -> list[tuple[str, str]]:
+    return _dedupe_models(list(_CHATGPT_MODEL_PATTERN.findall(html)))
+
+
+def _discover_chatgpt_models(
+    credentials: ProviderCredentialRecord,
+    _state_dir: Path,
+) -> list[tuple[str, str]]:
+    body = _http_get_json(
+        url="https://chat.openai.com/backend-api/models",
+        credentials=credentials,
+    )
+    if isinstance(body, dict):
+        items = body.get("models") if isinstance(body.get("models"), list) else body.get("data")
+        if isinstance(items, list):
+            models: list[tuple[str, str]] = []
+            for entry in items:
+                if not isinstance(entry, dict):
+                    continue
+                slug = str(entry.get("slug") or entry.get("id") or "").strip()
+                title = str(entry.get("title") or entry.get("name") or slug).strip()
+                if slug:
+                    models.append((slug, title))
+            if models:
+                return _dedupe_models(models)
+    # Fallback: parse the homepage HTML
+    try:
+        html = _fetch_text_page(url="https://chat.openai.com/", credentials=credentials)
+    except Exception:
+        return []
+    return _extract_chatgpt_models_from_html(html)
+
+
+# ─── Claude (claude.ai uses statsig + per-org model availability) ─────────────
+
+
+def _discover_claude_models(
+    credentials: ProviderCredentialRecord,
+    _state_dir: Path,
+) -> list[tuple[str, str]]:
+    orgs = _http_get_json(
+        url="https://claude.ai/api/organizations",
+        credentials=credentials,
+    )
+    if not isinstance(orgs, list) or not orgs:
+        return []
+    org_id: str | None = None
+    capabilities: list[str] = []
+    for org in orgs:
+        if not isinstance(org, dict):
+            continue
+        uuid_val = str(org.get("uuid") or "").strip()
+        if uuid_val:
+            org_id = uuid_val
+        org_capabilities = org.get("capabilities")
+        if isinstance(org_capabilities, list):
+            for capability in org_capabilities:
+                if isinstance(capability, str):
+                    capabilities.append(capability)
+        break
+    if not org_id:
+        return []
+    # Claude exposes its currently-available model slugs through statsig dynamic
+    # config. The exact endpoint shape moves around; we ask for the chat
+    # conversation features set and scrape any "model" strings out of it.
+    statsig = _http_get_json(
+        url=f"https://claude.ai/api/organizations/{org_id}/statsig/dynamic_configs/chat_models",
+        credentials=credentials,
+    )
+    models: list[tuple[str, str]] = []
+    if isinstance(statsig, dict):
+        config_value = statsig.get("value")
+        if isinstance(config_value, dict):
+            for key, value in config_value.items():
+                if not isinstance(key, str):
+                    continue
+                if key.startswith("claude-"):
+                    label = str(value) if isinstance(value, str) else key
+                    models.append((key, label or key))
+    # As a final fallback: extract claude-* slugs that the org's capabilities
+    # advertise (e.g. "claude_max_3_5_sonnet_v2_enabled").
+    if not models:
+        seen: set[str] = set()
+        for capability in capabilities:
+            match = re.search(r"(claude[-_][a-z0-9._-]+)", capability, flags=re.IGNORECASE)
+            if not match:
+                continue
+            slug = match.group(1).replace("_", "-")
+            if slug in seen:
+                continue
+            seen.add(slug)
+            models.append((slug, slug))
+    return _dedupe_models(models)
+
+
+# ─── Gemini (gemini.google.com HTML has model selector) ───────────────────────
+
+
+def _extract_gemini_models_from_html(html: str) -> list[tuple[str, str]]:
+    return _dedupe_models(list(_GEMINI_MODEL_PATTERN.findall(html)))
+
+
+def _discover_gemini_models(
+    credentials: ProviderCredentialRecord,
+    _state_dir: Path,
+) -> list[tuple[str, str]]:
+    try:
+        html = _fetch_text_page(url="https://gemini.google.com/app", credentials=credentials)
+    except Exception:
+        return []
+    return _extract_gemini_models_from_html(html)
+
+
+# ─── Grok (grok.com app HTML) ─────────────────────────────────────────────────
+
+
+def _extract_grok_models_from_html(html: str) -> list[tuple[str, str]]:
+    return _dedupe_models(list(_GROK_MODEL_PATTERN.findall(html)))
+
+
+def _discover_grok_models(
+    credentials: ProviderCredentialRecord,
+    _state_dir: Path,
+) -> list[tuple[str, str]]:
+    try:
+        html = _fetch_text_page(url="https://grok.com/", credentials=credentials)
+    except Exception:
+        return []
+    return _extract_grok_models_from_html(html)
+
+
+# ─── Xiaomi Mimo (xiaomimo.com home HTML) ─────────────────────────────────────
+
+
+def _extract_mimo_models_from_html(html: str) -> list[tuple[str, str]]:
+    return _dedupe_models(list(_MIMO_MODEL_PATTERN.findall(html)))
+
+
+def _discover_mimo_models(
+    credentials: ProviderCredentialRecord,
+    _state_dir: Path,
+) -> list[tuple[str, str]]:
+    try:
+        html = _fetch_text_page(url="https://xiaomimo.com/", credentials=credentials)
+    except Exception:
+        return []
+    return _extract_mimo_models_from_html(html)
+
+
+# ─── Unified Proxy (LiteLLM helper, if installed) ─────────────────────────────
+
+
+def _discover_unified_models(
+    credentials: ProviderCredentialRecord,
+    _state_dir: Path,
+) -> list[tuple[str, str]]:
+    # Only enumerate backends that the credentials file actually has keys for —
+    # listing every LiteLLM-supported model regardless of credentials would
+    # flood /v1/models with thousands of unreachable entries.
+    backends: list[str] = []
+    if credentials.metadata:
+        for key in credentials.metadata:
+            if not isinstance(key, str) or not key.startswith("api_key_"):
+                continue
+            backend = key[len("api_key_"):].strip()
+            if backend:
+                backends.append(backend)
+    if not backends:
+        return []
+    try:
+        import litellm  # type: ignore
+    except ImportError:
+        return []
+    models: list[tuple[str, str]] = []
+    model_cost = getattr(litellm, "model_cost", None)
+    if not isinstance(model_cost, dict):
+        return []
+    for raw_id, spec in model_cost.items():
+        if not isinstance(raw_id, str):
+            continue
+        if "/" not in raw_id:
+            # LiteLLM uses bare names for some providers (e.g. "gpt-4o"). Skip
+            # — without a backend prefix we can't disambiguate.
+            continue
+        provider_prefix = raw_id.split("/", 1)[0].lower()
+        if provider_prefix in {backend.lower() for backend in backends}:
+            display = str(spec.get("litellm_provider") if isinstance(spec, dict) else raw_id) or raw_id
+            models.append((raw_id, display))
+    return _dedupe_models(models)
+
+
 _DISCOVERERS = {
+    "deepseek": _discover_deepseek_models,
     "doubao": _discover_doubao_models,
     "glm-cn": _discover_glm_cn_models,
+    "glm-intl": _discover_glm_intl_models,
     "qwen-intl": _discover_qwen_intl_models,
     "qwen-cn": _discover_qwen_cn_models,
+    "kimi": _discover_kimi_models,
+    "claude": _discover_claude_models,
+    "chatgpt": _discover_chatgpt_models,
+    "gemini": _discover_gemini_models,
+    "grok": _discover_grok_models,
+    "mimo": _discover_mimo_models,
+    "manus": _discover_manus_models,
+    "nim": _discover_nim_models,
+    "unified": _discover_unified_models,
 }
 
 
