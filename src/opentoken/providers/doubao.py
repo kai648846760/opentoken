@@ -208,13 +208,10 @@ class DoubaoWebClient:
                 line = raw_line.strip()
                 if raw_line:
                     captured_lines.append(raw_line)
-                    # Detect a throttle event in the stream. The non-stream path
-                    # raises on these codes, but the streaming path used to just
-                    # produce no content chunks, so a rate-limited request looked
-                    # like an empty/successful answer. Raise as soon as we see the
-                    # signal (it arrives before any content), surfacing 429 to the
-                    # caller instead of a silent empty stream.
-                    if _doubao_payload_is_rate_limited(raw_line):
+                    # 节流码（710022004/710022002）是字面数字，单行就能命中 —— 早
+                    # 检测让我们不必等到 event 解析完才知道整个流是错的。结构化
+                    # 检测在下面的 parse 之后做，处理跨行 AND 条件。
+                    if "710022004" in raw_line or "710022002" in raw_line:
                         raise ProviderRateLimitError(_DOUBAO_RATE_LIMIT_MESSAGE)
                 if not line:
                     if current_event and current_data:
@@ -223,6 +220,8 @@ class DoubaoWebClient:
                         except json.JSONDecodeError:
                             parsed = None
                         if isinstance(parsed, dict):
+                            if _doubao_event_is_rate_limited(current_event, parsed):
+                                raise ProviderRateLimitError(_DOUBAO_RATE_LIMIT_MESSAGE)
                             for chunk in _extract_doubao_chunks_from_event(current_event, parsed):
                                 if chunk:
                                     yield chunk
@@ -237,6 +236,8 @@ class DoubaoWebClient:
                     except json.JSONDecodeError:
                         parsed = None
                     if isinstance(parsed, dict):
+                        if _doubao_event_is_rate_limited(event_name.strip(), parsed):
+                            raise ProviderRateLimitError(_DOUBAO_RATE_LIMIT_MESSAGE)
                         for chunk in _extract_doubao_chunks_from_event(event_name.strip(), parsed):
                             if chunk:
                                 yield chunk
@@ -410,17 +411,46 @@ def _extract_samantha_chunks(line: str) -> list[str]:
 
 
 def _doubao_payload_is_rate_limited(payload: str) -> bool:
-    """Shared predicate for the non-stream and streaming paths so the latter
-    doesn't silently emit empty output when Doubao throttles a 200 stream."""
+    """整-payload 检测节流：错误码 710022004/710022002 单行就能命中，但
+    "rate limit" + event_type:2005 形态需要整个 payload 同时含两个标记。
+    pretty-print 后 ``"event_type": 2005`` 会带空格，所以把 payload 去空白
+    再匹配，免得服务器某次切换格式我们就漏掉了。"""
+    if "710022004" in payload or "710022002" in payload:
+        return True
     lower_payload = payload.lower()
-    return (
-        "710022004" in payload
-        or "710022002" in payload
-        or ("rate limit" in lower_payload and ("stream_error" in lower_payload or '"event_type":2005' in lower_payload))
-        or ("访问频繁" in payload and '"event_type":2005' in payload)
-        or ("请稍后重试" in payload and '"event_type":2005' in payload)
-        or ("\"message\":\"block\"" in lower_payload and '"event_type":2005' in lower_payload)
-    )
+    compact_lower = re.sub(r"\s+", "", lower_payload)
+    has_event_type_2005 = '"event_type":2005' in compact_lower
+    if "rate limit" in lower_payload and ("stream_error" in lower_payload or has_event_type_2005):
+        return True
+    if has_event_type_2005 and ("访问频繁" in payload or "请稍后重试" in payload):
+        return True
+    if has_event_type_2005 and '"message":"block"' in compact_lower:
+        return True
+    return False
+
+
+def _doubao_event_is_rate_limited(event_name: str, parsed: object) -> bool:
+    """结构化检测：从已 parse 的 SSE event dict 里看 code/event_type，
+    比对 payload 字符串再 grep 可靠得多 —— 不受空格/字段顺序/嵌套结构影响。"""
+    if not isinstance(parsed, dict):
+        return False
+    code = parsed.get("code")
+    if code in (710022004, 710022002, "710022004", "710022002"):
+        return True
+    if parsed.get("event_type") == 2005:
+        # event_type=2005 是错误事件，含具体限流文案就当节流处理
+        message_blob = json.dumps(parsed, ensure_ascii=False).lower()
+        if "rate limit" in message_blob:
+            return True
+        if "访问频繁" in message_blob or "请稍后重试" in message_blob:
+            return True
+        if '"message":"block"' in re.sub(r"\s+", "", message_blob):
+            return True
+    if event_name.lower() in {"rate_limit", "rate_limit_error", "stream_error"}:
+        message_blob = json.dumps(parsed, ensure_ascii=False).lower()
+        if "rate limit" in message_blob or "限流" in message_blob:
+            return True
+    return False
 
 
 _DOUBAO_RATE_LIMIT_MESSAGE = (
