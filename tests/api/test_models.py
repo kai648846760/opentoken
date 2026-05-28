@@ -46,11 +46,10 @@ def test_models_endpoint_omits_retired_or_duplicate_ids() -> None:
     assert retired.isdisjoint(model_ids)
 
 
-def test_models_endpoint_still_advertises_local_embedding_aliases() -> None:
-    # /v1/embeddings now returns 501, but /v1/models still lists the canonical
-    # OpenAI embedding model ids so clients that probe model availability up
-    # front know they exist as aliases. This is intentional decoupling from the
-    # /v1/embeddings handler.
+def test_models_endpoint_does_not_advertise_unimplemented_embedding_models() -> None:
+    """/v1/embeddings 永久 501,所以 /v1/models 也不该再把 text-embedding-* 列
+    出来 —— 之前的"故意 decouple"会让 SDK auto-discover 拿了再调 → 51X 错误。
+    既然端点不可用,model 名也不暴露。"""
     client = TestClient(create_app())
 
     response = client.get("/v1/models")
@@ -58,8 +57,6 @@ def test_models_endpoint_still_advertises_local_embedding_aliases() -> None:
     assert response.status_code == 200
     model_ids = {item["id"] for item in response.json()["data"]}
 
-    assert {
-        "text-embedding-3-small",
-        "text-embedding-3-large",
-        "text-embedding-ada-002",
-    }.issubset(model_ids)
+    assert "text-embedding-3-small" not in model_ids
+    assert "text-embedding-3-large" not in model_ids
+    assert "text-embedding-ada-002" not in model_ids

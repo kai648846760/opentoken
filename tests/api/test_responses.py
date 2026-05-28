@@ -377,6 +377,54 @@ class StreamRouter:
         raise AssertionError("stream=true should use stream_chat when available")
 
 
+class StreamingToolCallRouter:
+    """模拟一个把 <tool_calls> 标签内联在 stream 文本里的 provider。
+    projector 会把这些标签从 visible delta 隐藏掉,responses 流式分支必须在末尾
+    重新解析 projector.raw_text,否则 tool_calls 完全丢失。"""
+
+    def stream_chat(self, request):
+        # 模拟模型先输出一段 visible 文字,再用 <tool_calls> 调工具。
+        yield "Let me check that for you. "
+        yield '<tool_calls>[{"name":"get_weather","arguments":{"location":"Tokyo"}}]</tool_calls>'
+
+    def chat(self, request):
+        raise AssertionError("stream=true should use stream_chat when available")
+
+
+def test_responses_stream_recovers_tool_calls_from_inline_markup(monkeypatch) -> None:
+    """流式 provider 把 <tool_calls> 文本嵌在内容里,projector 会隐藏它 ——
+    responses 流式分支必须在末尾 parse_web_tool_response 重组,否则客户端看不到
+    function call。"""
+    monkeypatch.setattr(responses_route_module, "get_default_router", lambda: StreamingToolCallRouter())
+    client = TestClient(create_app())
+
+    with client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "model": "algae/qwen-intl/qwen3.6-plus",
+            "input": "What's the weather in Tokyo?",
+            "tools": [
+                {"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}},
+            ],
+            "tool_choice": "auto",
+            "stream": True,
+        },
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    events = _parse_named_sse(body)
+    event_names = [name for name, _ in events]
+    # 必须发出至少一组 function_call SSE 事件,而不是把 tool_calls 静默吞掉。
+    assert "response.output_item.added" in event_names
+    assert "response.function_call_arguments.done" in event_names
+    assert "response.output_item.done" in event_names
+    done_payload = next(payload for name, payload in events if name == "response.function_call_arguments.done")
+    assert done_payload["name"] == "get_weather"
+    assert "Tokyo" in done_payload["arguments"]
+
+
 def test_responses_prefers_incremental_stream_when_router_supports_it(monkeypatch) -> None:
     monkeypatch.setattr(responses_route_module, "get_default_router", lambda: StreamRouter())
     client = TestClient(create_app())

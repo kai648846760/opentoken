@@ -77,16 +77,9 @@ def build_openai_model_objects(
             },
         )
 
-    for embedding_model in _LOCAL_EMBEDDING_MODELS:
-        ordered.setdefault(
-            embedding_model,
-            {
-                "id": embedding_model,
-                "object": "model",
-                "owned_by": "opentoken",
-            },
-        )
-
+    # 不再把 _LOCAL_EMBEDDING_MODELS 暴露到 /v1/models —— /v1/embeddings 永远
+    # 返 501,把这些 id 列出去会让 SDK auto-discover 流程拿了再调 → 51X 错误。
+    # 想恢复 embedding 接口时再把 endpoint + 这里同时打开。
     return list(ordered.values())
 
 

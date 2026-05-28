@@ -92,7 +92,10 @@ def chat_completions(payload: dict[str, object]) -> dict[str, object]:
     created = int(time())
     visible_content = strip_tool_protocol_markup(response.content, include_think=False) or ""
     message = _chat_message_payload(visible_content, response.tool_calls)
-    prompt_tokens = estimate_prompt_tokens(payload.get("messages") if isinstance(payload, dict) else None)
+    # 用 normalized 后的 messages 估算 prompt_tokens —— normalize 可能展开
+    # multimodal content / 注入 system / 解析 file_id 附件,raw payload 的
+    # messages 会少算实际发到上游的内容。
+    prompt_tokens = estimate_prompt_tokens(request.messages)
     completion_tokens = estimate_tokens(visible_content)
     return {
         "id": f"chatcmpl-{uuid4().hex}",

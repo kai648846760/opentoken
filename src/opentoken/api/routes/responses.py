@@ -21,6 +21,7 @@ from opentoken.gateway.normalized import normalize_responses_request
 from opentoken.gateway.router import get_default_router
 from opentoken.providers.base import ChatResponse
 from opentoken.providers.base import ProviderRateLimitError
+from opentoken.providers.web_tool_calling import parse_web_tool_response
 from opentoken.storage.response_store import (
     load_response_messages,
     save_response_messages,
@@ -203,6 +204,7 @@ def _stream_response_events(
                     output_index=output_index,
                 )
                 completed_output.append(completed_item)
+                output_index += 1
             else:
                 completed_item = yield from _yield_segment_done_events(
                     current_kind,
@@ -211,10 +213,68 @@ def _stream_response_events(
                     output_index=output_index,
                 )
                 completed_output.append(completed_item)
+                output_index += 1
+            # 流末尾从 projector.raw_text 重组 <tool_calls> —— projector 已经
+            # 把这些标签从可见输出里隐藏掉,如果不在这里解析它们就完全丢失,客户
+            # 端看到的是"模型空回答"。镜像非流式 fallback 路径的 function_call
+            # event 协议（response.output_item.added → arguments.delta+done →
+            # output_item.done）发射,并把 tool_calls 传给 _save_response_history
+            # 让续聊历史保留这次工具调用。
+            stream_tool_calls: list[dict[str, object]] = []
+            try:
+                _parsed_content, parsed_tool_calls, _finish = parse_web_tool_response(
+                    projector.raw_text,
+                    available_tools=request.tools if request.tools else None,
+                    tool_choice=request.tool_choice,
+                )
+                if parsed_tool_calls:
+                    stream_tool_calls = parsed_tool_calls
+            except Exception:
+                # 解析失败不应该污染已经流出的可见内容；当作没工具调用继续收尾。
+                pass
+            for tool_call in stream_tool_calls:
+                item = _function_call_output_item(tool_call, status="in_progress", arguments_override="")
+                completed_item = _function_call_output_item(tool_call, item_id=str(item["id"]), status="completed")
+                yield from _sse_event(
+                    "response.output_item.added",
+                    {"type": "response.output_item.added", "output_index": output_index, "item": item},
+                )
+                function = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
+                if not isinstance(function, dict):
+                    function = {}
+                arguments = function.get("arguments", "{}")
+                if not isinstance(arguments, str):
+                    arguments = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+                for piece in _chunk_function_call_arguments(arguments):
+                    yield from _sse_event(
+                        "response.function_call_arguments.delta",
+                        {
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": item["id"],
+                            "output_index": output_index,
+                            "delta": piece,
+                        },
+                    )
+                yield from _sse_event(
+                    "response.function_call_arguments.done",
+                    {
+                        "type": "response.function_call_arguments.done",
+                        "item_id": item["id"],
+                        "output_index": output_index,
+                        "arguments": arguments,
+                        "name": str(function.get("name", "")).strip(),
+                    },
+                )
+                yield from _sse_event(
+                    "response.output_item.done",
+                    {"type": "response.output_item.done", "output_index": output_index, "item": completed_item},
+                )
+                completed_output.append(_function_call_output_item(tool_call, item_id=str(item["id"])))
+                output_index += 1
             completed_response = _response_resource(
                 response_id=response_id,
                 created_at=created_at,
-                status="completed",
+                status="incomplete" if stream_tool_calls else "completed",
                 model=request.model,
                 output=completed_output,
                 usage=_estimate_response_usage(request, rendered_content),
@@ -222,7 +282,11 @@ def _stream_response_events(
             _save_response_history(
                 response_id=response_id,
                 request=request,
-                response=ChatResponse(model=request.model, content=rendered_content),
+                response=ChatResponse(
+                    model=request.model,
+                    content=rendered_content,
+                    tool_calls=stream_tool_calls,
+                ),
             )
             yield from _sse_event(
                 "response.completed",
@@ -662,7 +726,11 @@ def _resolve_request_with_previous_response(payload: dict[str, object]):
 
 def _save_response_history(*, response_id: str, request, response: ChatResponse) -> None:
     messages = list(request.messages)
-    rendered_content = strip_tool_protocol_markup(response.content)
+    # 保存历史时剥掉 <think> 标签和内部内容 —— 否则 previous_response_id 续聊
+    # 会把模型自己的 reasoning 重新喂回去：(a) 上下文翻倍/三倍,推理成本爆炸；
+    # (b) 模型被自己的草稿干扰。客户端如果想看推理过程,流式 SSE 里 think 标签
+    # 还在,这里只是不写入持久化历史。
+    rendered_content = strip_tool_protocol_markup(response.content, include_think=False)
     assistant_message: dict[str, object] = {
         "role": "assistant",
         "content": rendered_content,
