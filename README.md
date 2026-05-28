@@ -122,11 +122,14 @@ cat ~/.opentoken/config.json
 # {"api_key":"...","host":"127.0.0.1","port":32117}
 ```
 
-如果配置文件被改成 `"api_key": ""` 或纯空白 → 当前为 "keyless 本地模式"，请求免鉴权直接放行。<br>
-If `api_key` is empty/whitespace, opentoken treats it as keyless-local mode and accepts requests without auth.
+如果配置文件不存在（首次启动前） → 视为开发场景 keyless 放行。<br>
+If `config.json` doesn't exist (pre-first-run) → opentoken treats it as the dev keyless path.
 
-如果 `config.json` 被截断 / 不是合法 JSON → 中间件 **fail closed 返回 503**（不会回退到 keyless）。<br>
-If `config.json` is corrupt/unreadable → the middleware **fails closed with 503** instead of falling through to keyless.
+如果 `api_key` 字段被设成空字符串 / 纯空白但配置文件存在 → **fail closed 503**，因为这通常是 rotation 中把 key 清空忘了换、或者误删。要真的开 keyless 本地模式，必须显式：`"keyless_local": true`（同时把 `api_key` 设为空）。<br>
+If `api_key` is empty/whitespace but the config file exists → **503 fail-closed**, since that's usually a rotation in progress or a typo, not an intent to disable auth. To genuinely run keyless locally, opt in explicitly with `"keyless_local": true` (alongside an empty `api_key`).
+
+如果 `config.json` 被截断 / 不是合法 JSON / 不可读（权限问题等） → 中间件同样 **fail closed 返回 503**。<br>
+If `config.json` is corrupt/unreadable (parse failure or permission denied) → the middleware also **fails closed with 503**.
 
 ---
 

@@ -134,7 +134,12 @@ def _extract_glm_intl_phased_segments(payload: dict[str, object]) -> list[tuple[
     data = payload.get("data")
     if not isinstance(data, dict):
         return []
-    phase = str(data.get("phase") or data.get("data", {}).get("phase") or "").strip().lower()
+    # `data["data"]` 不保证是 dict —— GLM Intl 偶尔回成字符串/列表/null。原
+    # 来用 `.get("data", {}).get(...)` 在非 dict 时会 AttributeError 把整个
+    # 流崩掉；先 isinstance 守住，再取 phase。
+    nested_data = data.get("data")
+    nested_phase = nested_data.get("phase") if isinstance(nested_data, dict) else None
+    phase = str(data.get("phase") or nested_phase or "").strip().lower()
     delta = data.get("delta_content")
     if not isinstance(delta, str):
         nested = data.get("data")

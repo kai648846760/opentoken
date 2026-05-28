@@ -575,7 +575,12 @@ def _parse_named_tool_payload(payload: object) -> tuple[str, object]:
     if not name:
         raise RuntimeError("tool call name must be a non-empty string")
     arguments = payload.get("arguments", {})
-    if not isinstance(arguments, dict):
+    # `null` 是零参数工具的合理输出（模型对没有参数的 function 经常发 null
+    # 而不是 {}），原先一律 RuntimeError → 强制 repair round-trip 浪费 quota。
+    # 视 null/缺省为 {}；字符串类型走 _normalize_jsonish 再决定是否合法。
+    if arguments is None:
+        arguments = {}
+    elif not isinstance(arguments, dict):
         raise RuntimeError("tool_call.arguments must be an object")
     return name, arguments
 

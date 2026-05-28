@@ -99,12 +99,28 @@ def load_gateway_config(config_path: Path | None = None) -> GatewayConfig | None
         # PyYAML not installed — create default config
         return GatewayConfig()
 
-    raw = config_path.read_text(encoding="utf-8")
-    data = yaml.safe_load(raw)
+    # 整个 load 过程任何异常都不能传到 create_app —— 否则 yaml 语法错或字段验证
+    # 失败会让 uvicorn worker 起不来,整个服务不可用。失败就记日志 + 当作没配置,
+    # 让 opentoken 用默认行为。
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("gateway_config_unreadable path=%s error=%s", config_path, exc)
+        return None
+    try:
+        data = yaml.safe_load(raw)
+    except Exception as exc:
+        logger.warning("gateway_config_yaml_parse_failed path=%s error=%s", config_path, exc)
+        return None
     if not isinstance(data, dict):
         return None
-
-    return GatewayConfig(**data)
+    try:
+        return GatewayConfig(**data)
+    except Exception as exc:
+        logger.warning("gateway_config_validation_failed path=%s error=%s", config_path, exc)
+        return None
 
 
 def create_default_gateway_config() -> str:

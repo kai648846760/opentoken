@@ -421,3 +421,13 @@ def test_balanced_bracket_substring_respects_string_brackets() -> None:
     assert extracted == '[{"q":"a [bracketed] phrase"}]'
     import json as _json
     assert _json.loads(extracted) == [{"q": "a [bracketed] phrase"}]
+
+
+def test_parse_web_tool_response_accepts_null_arguments_for_zero_arg_tool() -> None:
+    """零参数工具的合理 emit 是 arguments=null —— 必须接受为 {}, 别 round-trip 修。"""
+    content, tool_calls, finish_reason = parse_web_tool_response(
+        '<tool_calls>[{"name":"get_time","arguments":null}]</tool_calls>'
+    )
+    assert finish_reason == "tool_calls"
+    assert tool_calls[0]["function"]["name"] == "get_time"
+    assert tool_calls[0]["function"]["arguments"] == "{}"

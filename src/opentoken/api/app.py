@@ -68,6 +68,18 @@ def create_app() -> FastAPI:
                     )
         return await call_next(request)
 
+    # require_api_key 必须先注册（成为 inner）—— Starlette 中间件 LIFO,后注册
+    # 的是 outer。assign_request_id 注册在后,作为最外层包装,即使 inner 的
+    # require_api_key 直接返回 401,也会回流经过 assign_request_id 注入
+    # X-Request-Id header（之前 401 响应没有 request id,客户端没法把 401 关联到
+    # 网关日志）。
+    @app.middleware("http")
+    async def require_api_key(request: Request, call_next):
+        rejection = maybe_require_api_key(request)
+        if rejection is not None:
+            return rejection
+        return await call_next(request)
+
     @app.middleware("http")
     async def assign_request_id(request: Request, call_next):
         request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
@@ -96,13 +108,6 @@ def create_app() -> FastAPI:
             elapsed_ms,
         )
         return response
-
-    @app.middleware("http")
-    async def require_api_key(request: Request, call_next):
-        rejection = maybe_require_api_key(request)
-        if rejection is not None:
-            return rejection
-        return await call_next(request)
 
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
